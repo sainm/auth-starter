@@ -1,0 +1,8 @@
+plugins {
+    kotlin("jvm")
+}
+
+dependencies {
+    api(project(":auth-core"))
+    implementation("org.slf4j:slf4j-api:2.0.16")
+}

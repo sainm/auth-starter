@@ -1,0 +1,43 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:auth_demo_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+      schema-locations: classpath:test-schema.sql
+      data-locations: classpath:test-data.sql
+
+auth-module:
+  enabled: true
+  organization:
+    mode: GROUP
+    tenant-enabled: true
+  authentication:
+    enabled-types:
+      - PASSWORD
+      - GOOGLE
+      - WECHAT
+  qr-login:
+    enabled: true
+    ttl-seconds: 180
+  audit:
+    enabled: true
+    record-success-logins: true
+    record-failed-logins: true
+    record-access-denied: true
+  security:
+    jwt:
+      secret: change-me-change-me-change-me-change-me
+      issuer: org.sainm.auth-demo-test
+      access-token-expire-minutes: 30
+      refresh-token-expire-days: 7
+    password:
+      encoder: argon2
+      min-length: 8
+    lock-strategy:
+      max-attempts: 5
+      lock-duration-minutes: 30
