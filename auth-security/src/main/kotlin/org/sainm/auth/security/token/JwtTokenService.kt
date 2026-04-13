@@ -19,13 +19,17 @@ import java.time.Clock
 import java.time.Instant
 import java.util.Date
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class JwtTokenService(
     private val properties: JwtTokenProperties,
     private val tokenBlacklistService: TokenBlacklistService? = null,
     private val userLookupService: UserLookupService? = null,
-    private val clock: Clock = Clock.systemUTC()
+    private val clock: Clock = Clock.systemUTC(),
+    private val passwordVersionCacheTtlSeconds: Long = 30
 ) : TokenService {
+
+    private val passwordVersionCache = ConcurrentHashMap<Long, CachedPasswordVersion>()
 
     override fun generate(userPrincipal: UserPrincipal): TokenPair {
         val now = Instant.now(clock)
@@ -40,36 +44,39 @@ class JwtTokenService(
 
     override fun parse(accessToken: String): UserPrincipal {
         val claims = parseClaims(accessToken)
-        return UserPrincipal(
-            userId = claims.subject.toLong(),
-            username = claims.getStringClaim("username"),
-            displayName = claims.getStringClaim("displayName"),
-            status = UserStatus.valueOf(claims.getStringClaim("status")),
-            groupId = claims.getLongClaimSafely("groupId"),
-            tenantId = claims.getLongClaimSafely("tenantId"),
-            roles = claims.getStringListClaim("roles")?.toSet().orEmpty(),
-            permissions = claims.getStringListClaim("permissions")?.toSet().orEmpty(),
-            attributes = mapOf("passwordVersion" to claims.getIntegerClaim("passwordVersion"))
-        )
+        return claims.toUserPrincipal()
     }
 
     override fun refresh(refreshToken: String): TokenPair {
         val claims = parseClaims(refreshToken)
         if (claims.getStringClaim("tokenUse") != "refresh") {
-            throw InvalidTokenException("刷新令牌无效")
+            throw InvalidTokenException("auth.refreshToken.invalid")
         }
-        val tokenPair = generate(parse(refreshToken))
+        val tokenPair = generate(claims.toUserPrincipal())
         invalidate(refreshToken)
         return tokenPair
     }
 
     override fun invalidate(accessToken: String) {
-        val claims = parseClaims(accessToken)
+        val claims = parseVerifiedClaims(accessToken)
         val jti = claims.jwtid ?: return
         val userId = claims.subject?.toLongOrNull() ?: return
         val expireAt = claims.expirationTime?.toInstant()?.epochSecond ?: return
         tokenBlacklistService?.blacklist(jti, userId, expireAt)
     }
+
+    private fun JWTClaimsSet.toUserPrincipal(): UserPrincipal =
+        UserPrincipal(
+            userId = subject.toLong(),
+            username = getStringClaim("username"),
+            displayName = getStringClaim("displayName"),
+            status = UserStatus.valueOf(getStringClaim("status")),
+            groupId = getLongClaimSafely("groupId"),
+            tenantId = getLongClaimSafely("tenantId"),
+            roles = getStringListClaim("roles")?.toSet().orEmpty(),
+            permissions = getStringListClaim("permissions")?.toSet().orEmpty(),
+            attributes = mapOf("passwordVersion" to getIntegerClaim("passwordVersion"))
+        )
 
     private fun createToken(
         principal: UserPrincipal,
@@ -109,11 +116,7 @@ class JwtTokenService(
     }
 
     private fun parseClaims(token: String): JWTClaimsSet {
-        val jwt = SignedJWT.parse(token)
-        if (!jwt.verify(MACVerifier(properties.secret.toByteArray()))) {
-            throw InvalidTokenException("令牌签名无效")
-        }
-        val claims = jwt.jwtClaimsSet
+        val claims = parseVerifiedClaims(token)
         val jti = claims.jwtid
         if (jti != null && tokenBlacklistService?.isBlacklisted(jti) == true) {
             throw InvalidTokenException()
@@ -122,19 +125,43 @@ class JwtTokenService(
         return claims
     }
 
+    private fun parseVerifiedClaims(token: String): JWTClaimsSet {
+        val jwt = SignedJWT.parse(token)
+        if (!jwt.verify(MACVerifier(properties.secret.toByteArray()))) {
+            throw InvalidTokenException("auth.token.signature.invalid")
+        }
+        return jwt.jwtClaimsSet
+    }
+
     private fun validatePasswordVersion(claims: JWTClaimsSet) {
         val userId = claims.subject?.toLongOrNull() ?: return
         val tokenPasswordVersion = claims.getIntegerClaim("passwordVersion") ?: 1
-        val currentPasswordVersion = userLookupService
+        val currentPasswordVersion = currentPasswordVersion(userId) ?: tokenPasswordVersion
+        if (currentPasswordVersion > tokenPasswordVersion) {
+            throw InvalidTokenException("auth.token.passwordVersion.invalid")
+        }
+    }
+
+    private fun currentPasswordVersion(userId: Long): Int? {
+        val now = Instant.now(clock).epochSecond
+        val cached = passwordVersionCache[userId]
+        if (cached != null && cached.expiresAtEpochSecond > now) {
+            return cached.version
+        }
+
+        val version = userLookupService
             ?.findById(userId)
             ?.attributes
             ?.get("passwordVersion")
             ?.let { it as? Number }
             ?.toInt()
-            ?: tokenPasswordVersion
-        if (currentPasswordVersion > tokenPasswordVersion) {
-            throw InvalidTokenException("令牌已因密码变更失效")
-        }
+            ?: return null
+
+        passwordVersionCache[userId] = CachedPasswordVersion(
+            version = version,
+            expiresAtEpochSecond = now + passwordVersionCacheTtlSeconds.coerceAtLeast(1)
+        )
+        return version
     }
 }
 
@@ -143,6 +170,11 @@ data class JwtTokenProperties(
     val issuer: String,
     val accessTokenExpireMinutes: Long,
     val refreshTokenExpireDays: Long
+)
+
+private data class CachedPasswordVersion(
+    val version: Int,
+    val expiresAtEpochSecond: Long
 )
 
 private fun JWTClaimsSet.getLongClaimSafely(name: String): Long? =

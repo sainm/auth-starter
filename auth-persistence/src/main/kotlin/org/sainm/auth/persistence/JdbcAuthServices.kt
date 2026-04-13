@@ -1,4 +1,4 @@
-package org.sainm.auth.persistence
+﻿package org.sainm.auth.persistence
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.sainm.auth.core.domain.UserPrincipal
@@ -39,6 +39,7 @@ import org.sainm.auth.core.spi.UserSummary
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.support.GeneratedKeyHolder
+import org.springframework.transaction.annotation.Transactional
 import org.springframework.dao.EmptyResultDataAccessException
 import org.springframework.security.crypto.password.PasswordEncoder
 import java.sql.Statement
@@ -271,7 +272,7 @@ class JdbcPasswordManagementService(
 
     private fun validateNewPassword(password: String) {
         if (password.length < minLength || password.none(Char::isUpperCase) || password.none(Char::isDigit)) {
-            throw PasswordValidationException("新密码至少 ${minLength} 位，且需包含大写字母和数字")
+            throw PasswordValidationException("auth.password.validation", minLength)
         }
     }
 }
@@ -280,8 +281,9 @@ class JdbcPermissionService(
     private val jdbcTemplate: JdbcTemplate
 ) : PermissionService {
 
-    override fun loadPermissions(userId: Long): Set<String> =
-        jdbcTemplate.queryForList(
+    override fun loadPermissions(userId: Long): Set<String> {
+        val tenantId = loadUserTenantId(userId)
+        return jdbcTemplate.queryForList(
             """
             select distinct p.permission_code
             from sys_permission p
@@ -298,17 +300,20 @@ class JdbcPermissionService(
                   and u.deleted = 0
             ) role_scope on role_scope.role_id = rp.role_id
             where p.enabled = 1
-              and (p.tenant_id is null or p.tenant_id = (select tenant_id from sys_user where id = ? and deleted = 0))
+              and (? is null or p.tenant_id is null or p.tenant_id = ?)
             order by p.permission_code
             """.trimIndent(),
             String::class.java,
             userId,
             userId,
-            userId
+            tenantId,
+            tenantId
         ).toSet()
+    }
 
-    override fun loadRoles(userId: Long): Set<String> =
-        jdbcTemplate.queryForList(
+    override fun loadRoles(userId: Long): Set<String> {
+        val tenantId = loadUserTenantId(userId)
+        return jdbcTemplate.queryForList(
             """
             select distinct r.role_code
             from sys_role r
@@ -324,14 +329,27 @@ class JdbcPermissionService(
                   and u.deleted = 0
             ) role_scope on role_scope.role_id = r.id
             where r.enabled = 1
-              and (r.tenant_id is null or r.tenant_id = (select tenant_id from sys_user where id = ? and deleted = 0))
+              and (? is null or r.tenant_id is null or r.tenant_id = ?)
             order by r.role_code
             """.trimIndent(),
             String::class.java,
             userId,
             userId,
-            userId
+            tenantId,
+            tenantId
         ).toSet()
+    }
+
+    private fun loadUserTenantId(userId: Long): Long? =
+        jdbcTemplate.query(
+            """
+            select tenant_id
+            from sys_user
+            where id = ? and deleted = 0
+            """.trimIndent(),
+            { rs, _ -> rs.getNullableLong("tenant_id") },
+            userId
+        ).firstOrNull()
 }
 
 class JdbcUserRegistrationService(
@@ -339,6 +357,7 @@ class JdbcUserRegistrationService(
     private val passwordEncoder: PasswordEncoder
 ) : UserRegistrationService {
 
+    @Transactional
     override fun register(command: UserRegistrationCommand): UserRegistrationResult {
         assertUsernameAvailable(command.username)
 
@@ -399,6 +418,7 @@ class JdbcUserRegistrationService(
         }
     }
 
+    @Transactional
     fun insertUser(
         username: String,
         displayName: String,
@@ -607,6 +627,9 @@ class JdbcUserAdminService(
             )
         }
 
+        val userIds = users.map { (it["id"] as Number).toLong() }
+        val rolesByUserId = loadRolesByUserIds(userIds)
+
         return users.map { row ->
             val userId = (row["id"] as Number).toLong()
             UserSummary(
@@ -620,26 +643,7 @@ class JdbcUserAdminService(
                 },
                 groupId = (row["group_id"] as Number?)?.toLong(),
                 tenantId = (row["tenant_id"] as Number?)?.toLong(),
-                roles = jdbcTemplate.queryForList(
-                    """
-                    select distinct r.role_code
-                    from sys_role r
-                    join (
-                        select role_id
-                        from sys_user_role
-                        where user_id = ?
-                        union
-                        select gr.role_id
-                        from sys_group_role gr
-                        join sys_user u on u.group_id = gr.group_id
-                        where u.id = ?
-                    ) role_scope on role_scope.role_id = r.id
-                    order by r.role_code
-                    """.trimIndent(),
-                    String::class.java,
-                    userId,
-                    userId
-                ).toSet()
+                roles = rolesByUserId[userId].orEmpty()
             )
         }
     }
@@ -685,41 +689,59 @@ class JdbcUserAdminService(
             *listOfNotNull(tenantId).toTypedArray()
         )
 
+    @Transactional
     override fun assignRoles(command: RoleAssignmentCommand): Set<String> {
         jdbcTemplate.update("delete from sys_user_role where user_id = ?", command.userId)
         if (command.roleCodes.isEmpty()) {
             return emptySet()
         }
 
-        val roleIds = jdbcTemplate.queryForList(
+        val placeholders = command.roleCodes.joinToString(",") { "?" }
+        jdbcTemplate.update(
             """
-            select id
+            insert into sys_user_role (user_id, role_id)
+            select ?, id
             from sys_role
-            where role_code in (${command.roleCodes.joinToString(",") { "?" }})
+            where role_code in ($placeholders)
             """.trimIndent(),
-            Long::class.java,
+            command.userId,
             *command.roleCodes.toTypedArray()
         )
+        return loadRolesByUserIds(listOf(command.userId))[command.userId].orEmpty()
+    }
 
-        roleIds.forEach { roleId ->
-            jdbcTemplate.update(
-                """
-                insert into sys_user_role (user_id, role_id)
-                select ?, ?
-                where not exists (
-                    select 1 from sys_user_role where user_id = ? and role_id = ?
-                )
-                """.trimIndent(),
-                command.userId,
-                roleId,
-                command.userId,
-                roleId
-            )
+    private fun loadRolesByUserIds(userIds: List<Long>): Map<Long, Set<String>> {
+        if (userIds.isEmpty()) {
+            return emptyMap()
         }
-        return listUsers(1, Int.MAX_VALUE, null)
-            .firstOrNull { it.userId == command.userId }
-            ?.roles
-            .orEmpty()
+
+        val placeholders = userIds.joinToString(",") { "?" }
+        val args = userIds.toTypedArray()
+        val rolesByUserId = linkedMapOf<Long, MutableSet<String>>()
+        jdbcTemplate.query(
+            """
+            select distinct user_scope.user_id, r.role_code
+            from sys_role r
+            join (
+                select ur.user_id, ur.role_id
+                from sys_user_role ur
+                where ur.user_id in ($placeholders)
+                union
+                select u.id as user_id, gr.role_id
+                from sys_group_role gr
+                join sys_user u on u.group_id = gr.group_id
+                where u.id in ($placeholders)
+            ) user_scope on user_scope.role_id = r.id
+            order by user_scope.user_id, r.role_code
+            """.trimIndent(),
+            { rs ->
+                val userId = rs.getLong("user_id")
+                rolesByUserId.getOrPut(userId) { linkedSetOf() } += rs.getString("role_code")
+            },
+            *args,
+            *args
+        )
+        return rolesByUserId.mapValues { (_, roles) -> roles.toSet() }
     }
 }
 
@@ -727,8 +749,8 @@ class JdbcOrganizationService(
     private val jdbcTemplate: JdbcTemplate
 ) : OrganizationService {
 
-    override fun listGroups(tenantId: Long?): List<GroupSummary> =
-        jdbcTemplate.query(
+    override fun listGroups(tenantId: Long?): List<GroupSummary> {
+        val groups = jdbcTemplate.query(
             """
             select id, group_code, group_name, tenant_id, parent_id, ancestors
             from sys_group
@@ -743,23 +765,16 @@ class JdbcOrganizationService(
                     groupName = rs.getString("group_name"),
                     tenantId = rs.getNullableLong("tenant_id"),
                     parentId = rs.getNullableLong("parent_id"),
-                    ancestors = rs.getString("ancestors"),
-                    roles = jdbcTemplate.queryForList(
-                        """
-                        select r.role_code
-                        from sys_group_role gr
-                        join sys_role r on r.id = gr.role_id
-                        where gr.group_id = ?
-                        order by r.role_code
-                        """.trimIndent(),
-                        String::class.java,
-                        groupId
-                    ).toSet()
+                    ancestors = rs.getString("ancestors")
                 )
             },
             *listOfNotNull(tenantId).toTypedArray()
         )
+        val rolesByGroupId = loadRolesByGroupIds(groups.map { it.groupId })
+        return groups.map { group -> group.copy(roles = rolesByGroupId[group.groupId].orEmpty()) }
+    }
 
+    @Transactional
     override fun createGroup(command: CreateGroupCommand): GroupSummary {
         val ancestors = resolveAncestors(command.parentId)
         val keyHolder = GeneratedKeyHolder()
@@ -784,35 +799,23 @@ class JdbcOrganizationService(
         return GroupSummary(groupId, command.groupCode, command.groupName, command.tenantId, command.parentId, ancestors)
     }
 
+    @Transactional
     override fun assignGroupRoles(command: GroupRoleAssignmentCommand): Set<String> {
         jdbcTemplate.update("delete from sys_group_role where group_id = ?", command.groupId)
         if (command.roleCodes.isEmpty()) {
             return emptySet()
         }
-        val roleIds = jdbcTemplate.queryForList(
+        val placeholders = command.roleCodes.joinToString(",") { "?" }
+        jdbcTemplate.update(
             """
-            select id
+            insert into sys_group_role (group_id, role_id)
+            select ?, id
             from sys_role
-            where role_code in (${command.roleCodes.joinToString(",") { "?" }})
+            where role_code in ($placeholders)
             """.trimIndent(),
-            Long::class.java,
+            command.groupId,
             *command.roleCodes.toTypedArray()
         )
-        roleIds.forEach { roleId ->
-            jdbcTemplate.update(
-                """
-                insert into sys_group_role (group_id, role_id)
-                select ?, ?
-                where not exists (
-                    select 1 from sys_group_role where group_id = ? and role_id = ?
-                )
-                """.trimIndent(),
-                command.groupId,
-                roleId,
-                command.groupId,
-                roleId
-            )
-        }
         return jdbcTemplate.queryForList(
             """
             select r.role_code
@@ -824,6 +827,30 @@ class JdbcOrganizationService(
             String::class.java,
             command.groupId
         ).toSet()
+    }
+
+    private fun loadRolesByGroupIds(groupIds: List<Long>): Map<Long, Set<String>> {
+        if (groupIds.isEmpty()) {
+            return emptyMap()
+        }
+
+        val placeholders = groupIds.joinToString(",") { "?" }
+        val rolesByGroupId = linkedMapOf<Long, MutableSet<String>>()
+        jdbcTemplate.query(
+            """
+            select gr.group_id, r.role_code
+            from sys_group_role gr
+            join sys_role r on r.id = gr.role_id
+            where gr.group_id in ($placeholders)
+            order by gr.group_id, r.role_code
+            """.trimIndent(),
+            { rs ->
+                val groupId = rs.getLong("group_id")
+                rolesByGroupId.getOrPut(groupId) { linkedSetOf() } += rs.getString("role_code")
+            },
+            *groupIds.toTypedArray()
+        )
+        return rolesByGroupId.mapValues { (_, roles) -> roles.toSet() }
     }
 
     override fun listTenants(tenantId: Long?): List<TenantSummary> =
@@ -885,6 +912,7 @@ class JdbcSocialAccountService(
     private val userRegistrationService: JdbcUserRegistrationService
 ) : SocialAccountService {
 
+    @Transactional
     override fun findOrCreate(identity: SocialIdentity): UserPrincipal {
         val normalizedProvider = identity.provider.uppercase()
         val externalId = identity.externalId.trim()
@@ -1017,3 +1045,4 @@ private fun java.sql.PreparedStatement.setNullableLong(index: Int, value: Long?)
         setLong(index, value)
     }
 }
+

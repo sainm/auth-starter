@@ -45,6 +45,9 @@ import org.springframework.beans.factory.ObjectProvider
 import org.springframework.http.HttpHeaders
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.web.context.request.RequestAttributes
+import org.springframework.web.context.request.RequestContextHolder
+import org.springframework.web.context.request.ServletRequestAttributes
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
@@ -92,7 +95,7 @@ class AuthController(
 
     @PostMapping("/social/google")
     fun googleLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        ApiResponse.ok(buildAuthResponse(socialLoginService().authenticate("GOOGLE", request.authCode)))
+        ApiResponse.ok(buildAuthResponse(enrichUser(socialLoginService().authenticate("GOOGLE", request.authCode).userId)))
 
     @PostMapping("/social/google/mock")
     fun googleMockLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
@@ -100,7 +103,7 @@ class AuthController(
 
     @PostMapping("/social/wechat")
     fun wechatLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        ApiResponse.ok(buildAuthResponse(socialLoginService().authenticate("WECHAT", request.authCode)))
+        ApiResponse.ok(buildAuthResponse(enrichUser(socialLoginService().authenticate("WECHAT", request.authCode).userId)))
 
     @PostMapping("/social/wechat/mock")
     fun wechatMockLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
@@ -130,7 +133,7 @@ class AuthController(
             )
         }
 
-        val scene = qrLoginService().getScene(sceneCode) ?: throw IllegalArgumentException("QR scene not found")
+        val scene = qrLoginService().getScene(sceneCode) ?: throw IllegalArgumentException("auth.qr.scene.notFound")
         return ApiResponse.ok(scene.toResponse())
     }
 
@@ -385,6 +388,10 @@ class AuthController(
         ApiResponse.ok(auditQueryService.findSecurityEvents(page, size, eventType))
 
     private fun enrichUser(userId: Long) =
+        requestUserCache()[userId]
+            ?: loadEnrichedUser(userId).also { requestUserCache()[userId] = it }
+
+    private fun loadEnrichedUser(userId: Long) =
         userLookupService.findById(userId)
             ?.copy(
                 roles = permissionService.loadRoles(userId),
@@ -393,26 +400,43 @@ class AuthController(
             ?: throw AuthenticatedUserNotFoundException()
 
     private fun buildAuthResponse(user: org.sainm.auth.core.domain.UserPrincipal): AuthResponse {
-        val enriched = enrichUser(user.userId)
-        val tokenPair = tokenService.generate(enriched)
+        val tokenPair = tokenService.generate(user)
         return AuthResponse(
             accessToken = tokenPair.accessToken,
             refreshToken = tokenPair.refreshToken,
             tokenType = tokenPair.tokenType,
             expiresIn = tokenPair.expiresIn,
-            user = enriched
+            user = user
         )
     }
 
     private fun qrLoginService(): QrLoginService =
-        qrLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("QR login is disabled")
+        qrLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.qr.disabled")
 
     private fun socialLoginService(): SocialLoginService =
-        socialLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("Social login is disabled")
+        socialLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.social.disabled")
 
     private fun scopedTenantId(principalUserId: Long?, requestedTenantId: Long?): Long? {
         val principal = principalUserId?.let(::enrichUser) ?: return requestedTenantId
         return if ("SUPER_ADMIN" in principal.roles) requestedTenantId else principal.tenantId
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun requestUserCache(): MutableMap<Long, org.sainm.auth.core.domain.UserPrincipal> {
+        val requestAttributes = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
+        if (requestAttributes == null) {
+            return mutableMapOf()
+        }
+
+        val existing = requestAttributes.getAttribute(USER_CACHE_ATTRIBUTE, RequestAttributes.SCOPE_REQUEST)
+            as? MutableMap<Long, org.sainm.auth.core.domain.UserPrincipal>
+        if (existing != null) {
+            return existing
+        }
+
+        val created = mutableMapOf<Long, org.sainm.auth.core.domain.UserPrincipal>()
+        requestAttributes.setAttribute(USER_CACHE_ATTRIBUTE, created, RequestAttributes.SCOPE_REQUEST)
+        return created
     }
 
     private fun org.sainm.auth.core.spi.QrSceneSummary.toResponse(auth: AuthResponse? = null) =
@@ -424,4 +448,8 @@ class AuthController(
             approvedUserId = approvedUserId,
             auth = auth
         )
+
+    companion object {
+        private const val USER_CACHE_ATTRIBUTE = "auth.enrichedUsers"
+    }
 }

@@ -6,6 +6,9 @@ import org.sainm.auth.core.exception.InvalidTokenException
 import org.sainm.auth.core.spi.TokenBlacklistService
 import org.sainm.auth.core.spi.UserCredentialView
 import org.sainm.auth.core.spi.UserLookupService
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -70,6 +73,25 @@ class JwtTokenServiceTest {
     }
 
     @Test
+    fun `refresh token misuse returns readable message`() {
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            )
+        )
+
+        val tokenPair = service.generate(principal)
+        val error = assertFailsWith<InvalidTokenException> {
+            service.refresh(tokenPair.accessToken)
+        }
+
+        assertEquals("auth.refreshToken.invalid", error.message)
+    }
+
+    @Test
     fun `invalidate blacklists access token`() {
         val blacklist = InMemoryTokenBlacklistService()
         val service = JwtTokenService(
@@ -113,6 +135,103 @@ class JwtTokenServiceTest {
             service.parse(tokenPair.accessToken)
         }
     }
+
+    @Test
+    fun `invalid signature returns readable message`() {
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            )
+        )
+        val otherService = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "another-secret-another-secret-1234",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            )
+        )
+
+        val tokenPair = service.generate(principal)
+        val error = assertFailsWith<InvalidTokenException> {
+            otherService.parse(tokenPair.accessToken)
+        }
+
+        assertEquals("auth.token.signature.invalid", error.message)
+    }
+
+    @Test
+    fun `password version lookup is cached briefly across parses`() {
+        val lookupService = CountingUserLookupService(principal)
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            ),
+            userLookupService = lookupService,
+            clock = Clock.fixed(Instant.parse("2026-04-13T00:00:00Z"), ZoneOffset.UTC),
+            passwordVersionCacheTtlSeconds = 60
+        )
+
+        val tokenPair = service.generate(principal)
+
+        service.parse(tokenPair.accessToken)
+        service.parse(tokenPair.accessToken)
+
+        assertEquals(1, lookupService.findByIdCalls)
+    }
+
+    @Test
+    fun `refresh parses token only once for password version lookup`() {
+        val lookupService = CountingUserLookupService(principal)
+        val blacklist = InMemoryTokenBlacklistService()
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            ),
+            tokenBlacklistService = blacklist,
+            userLookupService = lookupService,
+            clock = Clock.fixed(Instant.parse("2026-04-13T00:00:00Z"), ZoneOffset.UTC),
+            passwordVersionCacheTtlSeconds = 60
+        )
+
+        val tokenPair = service.generate(principal)
+        service.refresh(tokenPair.refreshToken)
+
+        assertEquals(1, lookupService.findByIdCalls)
+    }
+
+    @Test
+    fun `invalidate does not query password version`() {
+        val lookupService = CountingUserLookupService(principal)
+        val blacklist = InMemoryTokenBlacklistService()
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            ),
+            tokenBlacklistService = blacklist,
+            userLookupService = lookupService
+        )
+
+        val tokenPair = service.generate(principal)
+        service.invalidate(tokenPair.accessToken)
+
+        assertEquals(0, lookupService.findByIdCalls)
+        assertFailsWith<InvalidTokenException> {
+            service.parse(tokenPair.accessToken)
+        }
+    }
 }
 
 private class InMemoryTokenBlacklistService : TokenBlacklistService {
@@ -123,4 +242,17 @@ private class InMemoryTokenBlacklistService : TokenBlacklistService {
     }
 
     override fun isBlacklisted(jti: String): Boolean = jti in blacklisted
+}
+
+private class CountingUserLookupService(
+    private val user: UserPrincipal
+) : UserLookupService {
+    var findByIdCalls: Int = 0
+
+    override fun findById(userId: Long): UserPrincipal {
+        findByIdCalls++
+        return user
+    }
+
+    override fun findByPrincipal(principal: String): UserCredentialView? = null
 }

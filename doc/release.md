@@ -9,7 +9,7 @@
 ## Pre-release Checklist
 
 1. Run:
-   `D:\gradle-9.4.0-bin\gradle-9.4.0\bin\gradle.bat --no-daemon clean build`
+   `.\gradlew.bat --no-daemon clean build`
 2. Verify [`README.md`](/d:/source/auth-starter/README.md), [`doc/api.md`](/d:/source/auth-starter/doc/api.md), and [`doc/schema-postgresql.sql`](/d:/source/auth-starter/doc/schema-postgresql.sql) match the code.
 3. Run [`auth-demo`](/d:/source/auth-starter/auth-demo/build.gradle.kts) integration tests.
    The PostgreSQL Testcontainers test will auto-skip when Docker is unavailable.
@@ -18,7 +18,7 @@
 
 ## Local Publish Verification
 
-`publishToMavenLocal` has been verified on the current repository by publishing explicit `jar`, `sourcesJar`, and `javadocJar` artifacts with a manually generated dependency section in the POM.
+`publishToMavenLocal` has been verified on the current repository by publishing explicit `jar`, `sourcesJar`, and `javadocJar` artifacts with a manually generated dependency section in the POM. Use the checked-in Gradle wrapper for local verification.
 
 ## Artifact Flow
 

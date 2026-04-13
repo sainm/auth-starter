@@ -89,9 +89,11 @@ class JdbcPasswordSecurityServicesTest {
         seedUser("bob", "P@ssw0rd1")
         val service = JdbcPasswordManagementService(jdbcTemplate, passwordEncoder, 8)
 
-        assertFailsWith<PasswordValidationException> {
+        val error = assertFailsWith<PasswordValidationException> {
             service.resetPassword(ResetPasswordCommand("bob", "weak"))
         }
+
+        assertEquals("auth.password.validation", error.message)
     }
 
     @Test

@@ -45,8 +45,10 @@ class DefaultSocialLoginServiceTest {
             override fun findOrCreate(identity: SocialIdentity): UserPrincipal = error("unused")
         })
 
-        assertFailsWith<IllegalArgumentException> {
+        val error = assertFailsWith<IllegalArgumentException> {
             service.authenticate("wechat", "demo-code")
         }
+
+        assertEquals("auth.social.provider.unsupported", error.message)
     }
 }

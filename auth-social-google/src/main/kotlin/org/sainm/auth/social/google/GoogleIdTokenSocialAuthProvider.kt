@@ -21,8 +21,8 @@ class GoogleIdTokenSocialAuthProvider(
 
     override fun resolve(authCode: String): SocialIdentity {
         val token = authCode.trim()
-        require(token.isNotBlank()) { "idToken must not be blank" }
-        val idToken = verifier.verify(token) ?: throw IllegalArgumentException("Invalid Google ID token")
+        require(token.isNotBlank()) { "auth.social.google.idToken.blank" }
+        val idToken = verifier.verify(token) ?: throw IllegalArgumentException("auth.social.google.idToken.invalid")
         val payload = idToken.payload
         return SocialIdentity(
             provider = provider,

@@ -148,6 +148,8 @@ create table if not exists sys_login_log (
 
 create index if not exists idx_sys_login_log_user_id on sys_login_log (user_id);
 create index if not exists idx_sys_login_log_created_at on sys_login_log (created_at);
+create index if not exists idx_sys_login_log_result_id_desc on sys_login_log (result, id desc);
+create index if not exists idx_sys_login_log_principal_result_id_desc on sys_login_log (principal, result, id desc);
 
 create table if not exists sys_security_event (
     id bigserial primary key,
@@ -161,6 +163,7 @@ create table if not exists sys_security_event (
 
 create index if not exists idx_sys_security_event_type on sys_security_event (event_type);
 create index if not exists idx_sys_security_event_created_at on sys_security_event (created_at);
+create index if not exists idx_sys_security_event_type_id_desc on sys_security_event (event_type, id desc);
 
 create table if not exists sys_token_blacklist (
     id bigserial primary key,

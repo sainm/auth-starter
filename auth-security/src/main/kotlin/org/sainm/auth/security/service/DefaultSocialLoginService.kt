@@ -14,7 +14,7 @@ class DefaultSocialLoginService(
 
     override fun authenticate(provider: String, authCode: String): UserPrincipal {
         val authProvider = providersByName[provider.uppercase()]
-            ?: throw IllegalArgumentException("Unsupported social provider: $provider")
+            ?: throw IllegalArgumentException("auth.social.provider.unsupported")
         val identity = authProvider.resolve(authCode)
         return socialAccountService.findOrCreate(identity)
     }

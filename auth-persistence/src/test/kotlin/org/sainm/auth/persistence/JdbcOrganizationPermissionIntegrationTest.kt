@@ -2,6 +2,7 @@ package org.sainm.auth.persistence
 
 import org.sainm.auth.core.spi.CreateGroupCommand
 import org.sainm.auth.core.spi.GroupRoleAssignmentCommand
+import org.sainm.auth.core.spi.RoleAssignmentCommand
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
 import kotlin.test.BeforeTest
@@ -160,6 +161,42 @@ class JdbcOrganizationPermissionIntegrationTest {
         assertEquals(1L, loadedChild.parentId)
         assertEquals(setOf("REVIEWER"), assigned)
         assertTrue("REVIEWER" in loadedChild.roles)
+    }
+
+    @Test
+    fun `organization service batches group role lookup`() {
+        seedTenantAndGroup()
+        jdbcTemplate.update("insert into sys_group (id, tenant_id, group_code, group_name, parent_id, ancestors, is_default) values (2, 1, 'CHILD', 'Child Group', null, null, 0)")
+        jdbcTemplate.update("insert into sys_role (id, tenant_id, role_code, role_name, enabled) values (1, 1, 'GROUP_ADMIN', 'Group Admin', 1)")
+        jdbcTemplate.update("insert into sys_role (id, tenant_id, role_code, role_name, enabled) values (2, 1, 'REVIEWER', 'Reviewer', 1)")
+        jdbcTemplate.update("insert into sys_group_role (group_id, role_id) values (1, 1)")
+        jdbcTemplate.update("insert into sys_group_role (group_id, role_id) values (2, 2)")
+
+        val service = JdbcOrganizationService(jdbcTemplate)
+        val groups = service.listGroups(1)
+
+        assertEquals(setOf("GROUP_ADMIN"), groups.first { it.groupId == 1L }.roles)
+        assertEquals(setOf("REVIEWER"), groups.first { it.groupId == 2L }.roles)
+    }
+
+    @Test
+    fun `user admin service batches role lookup and returns updated roles`() {
+        seedTenantAndGroup()
+        jdbcTemplate.update("insert into sys_user (id, username, display_name, status, group_id, tenant_id, deleted) values (1, 'alice', 'Alice', 1, 1, 1, 0)")
+        jdbcTemplate.update("insert into sys_user (id, username, display_name, status, group_id, tenant_id, deleted) values (2, 'bob', 'Bob', 1, null, 1, 0)")
+        jdbcTemplate.update("insert into sys_role (id, tenant_id, role_code, role_name, enabled) values (1, 1, 'GROUP_ADMIN', 'Group Admin', 1)")
+        jdbcTemplate.update("insert into sys_role (id, tenant_id, role_code, role_name, enabled) values (2, 1, 'USER_ADMIN', 'User Admin', 1)")
+        jdbcTemplate.update("insert into sys_group_role (group_id, role_id) values (1, 1)")
+        jdbcTemplate.update("insert into sys_user_role (user_id, role_id) values (2, 2)")
+
+        val service = JdbcUserAdminService(jdbcTemplate)
+
+        val users = service.listUsers(1, 10, 1)
+        val updatedRoles = service.assignRoles(RoleAssignmentCommand(1, setOf("USER_ADMIN")))
+
+        assertEquals(setOf("GROUP_ADMIN"), users.first { it.userId == 1L }.roles)
+        assertEquals(setOf("USER_ADMIN"), users.first { it.userId == 2L }.roles)
+        assertEquals(setOf("GROUP_ADMIN", "USER_ADMIN"), updatedRoles)
     }
 
     private fun seedTenantAndGroup() {

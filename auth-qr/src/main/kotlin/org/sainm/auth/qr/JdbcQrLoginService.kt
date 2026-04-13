@@ -53,7 +53,7 @@ class JdbcQrLoginService(
     override fun scanScene(sceneCode: String, userId: Long): QrSceneSummary {
         val scene = requireActiveScene(sceneCode)
         if (scene.status != "PENDING" && scene.status != "SCANNED") {
-            throw IllegalArgumentException("QR scene cannot be scanned in current status")
+            throw IllegalArgumentException("auth.qr.scene.scan.invalidStatus")
         }
         val updated = jdbcTemplate.update(
             """
@@ -70,17 +70,17 @@ class JdbcQrLoginService(
         if (updated != 1) {
             throw IllegalStateException("QR scene state changed while scanning")
         }
-        return getScene(sceneCode) ?: error("QR scene missing after scan")
+        return scene.copy(status = "SCANNED", scannedUserId = userId)
     }
 
     override fun confirmScene(sceneCode: String, userId: Long): QrSceneSummary {
         val scene = requireActiveScene(sceneCode)
         if (scene.status != "SCANNED") {
-            throw IllegalArgumentException("QR scene is not waiting for confirmation")
+            throw IllegalArgumentException("auth.qr.scene.confirm.invalidStatus")
         }
         val scannedUserId = scene.scannedUserId
         if (scannedUserId != null && scannedUserId != userId) {
-            throw IllegalArgumentException("QR scene scanned by another user")
+            throw IllegalArgumentException("auth.qr.scene.scannedByAnotherUser")
         }
         val updated = jdbcTemplate.update(
             """
@@ -97,7 +97,7 @@ class JdbcQrLoginService(
         if (updated != 1) {
             throw IllegalStateException("QR scene state changed while confirming")
         }
-        return getScene(sceneCode) ?: error("QR scene missing after confirmation")
+        return scene.copy(status = "APPROVED", approvedUserId = userId)
     }
 
     override fun cancelScene(sceneCode: String, userId: Long?): QrSceneSummary {
@@ -106,7 +106,7 @@ class JdbcQrLoginService(
             return scene
         }
         if (userId != null && scene.scannedUserId != null && scene.scannedUserId != userId && scene.approvedUserId != userId) {
-            throw IllegalArgumentException("QR scene belongs to another user")
+            throw IllegalArgumentException("auth.qr.scene.belongsToAnotherUser")
         }
         val updated = jdbcTemplate.update(
             """
@@ -120,7 +120,7 @@ class JdbcQrLoginService(
         if (updated != 1) {
             return getScene(sceneCode) ?: error("QR scene missing after cancel")
         }
-        return getScene(sceneCode) ?: error("QR scene missing after cancel")
+        return scene.copy(status = "CANCELED")
     }
 
     override fun consumeScene(sceneCode: String): QrLoginResult? {
@@ -157,9 +157,9 @@ class JdbcQrLoginService(
         )
 
     private fun requireActiveScene(sceneCode: String): QrSceneSummary {
-        val scene = getScene(sceneCode) ?: throw IllegalArgumentException("QR scene not found")
+        val scene = getScene(sceneCode) ?: throw IllegalArgumentException("auth.qr.scene.notFound")
         if (scene.status == "EXPIRED") {
-            throw IllegalArgumentException("QR scene expired")
+            throw IllegalArgumentException("auth.qr.scene.expired")
         }
         return scene
     }

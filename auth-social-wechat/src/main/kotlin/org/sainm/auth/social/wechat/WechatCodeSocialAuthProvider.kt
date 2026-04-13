@@ -22,14 +22,13 @@ class WechatCodeSocialAuthProvider(
 
     override fun resolve(authCode: String): SocialIdentity {
         val normalizedCode = authCode.trim()
-        require(normalizedCode.isNotBlank()) { "authCode must not be blank" }
+        require(normalizedCode.isNotBlank()) { "auth.social.wechat.authCode.blank" }
 
         val response = exchangeCode(normalizedCode)
         val openId = response.path("openid").asText("").trim()
         val unionId = response.path("unionid").asText("").trim()
         if (openId.isBlank()) {
-            val message = response.path("errmsg").asText("Missing openid from WeChat response")
-            throw IllegalArgumentException(message)
+            throw IllegalArgumentException("auth.social.wechat.openId.missing")
         }
 
         return SocialIdentity(

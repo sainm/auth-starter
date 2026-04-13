@@ -1,14 +1,19 @@
 package org.sainm.auth.security.config
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.sainm.auth.core.spi.AuditEvent
 import org.sainm.auth.core.spi.AuditEventPublisher
 import org.sainm.auth.core.spi.TokenService
+import org.sainm.auth.core.domain.UserPrincipal
 import org.sainm.auth.security.authz.AuthPermissionEvaluator
+import org.sainm.auth.security.api.ApiResponse
 import org.sainm.auth.security.web.JwtAuthenticationFilter
+import org.springframework.context.MessageSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.support.ResourceBundleMessageSource
 import org.springframework.http.HttpMethod
 import org.springframework.security.config.Customizer
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
@@ -18,10 +23,19 @@ import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.security.web.access.AccessDeniedHandler
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
+import java.util.Locale
 
 @Configuration
 @EnableMethodSecurity
 class AuthSecurityConfiguration {
+
+    @Bean
+    fun messageSource(): ResourceBundleMessageSource =
+        ResourceBundleMessageSource().apply {
+            setBasenames("messages")
+            setDefaultEncoding("UTF-8")
+            setFallbackToSystemLocale(false)
+        }
 
     @Bean
     fun authPermissionEvaluator(): AuthPermissionEvaluator = AuthPermissionEvaluator()
@@ -74,14 +88,19 @@ class AuthSecurityConfiguration {
     }
 
     @Bean
-    fun accessDeniedHandler(auditEventPublisher: AuditEventPublisher): AccessDeniedHandler =
+    fun accessDeniedHandler(
+        auditEventPublisher: AuditEventPublisher,
+        messageSource: MessageSource,
+        objectMapper: ObjectMapper
+    ): AccessDeniedHandler =
         AccessDeniedHandler { request: HttpServletRequest, response: HttpServletResponse, ex ->
             val authentication = org.springframework.security.core.context.SecurityContextHolder.getContext().authentication
+            val authenticatedUser = authentication?.credentials as? UserPrincipal
             auditEventPublisher.publish(
                 AuditEvent(
                     type = "ACCESS_DENIED",
-                    userId = authentication?.principal as? Long,
-                    principal = authentication?.name,
+                    userId = authenticatedUser?.userId ?: (authentication?.principal as? Long),
+                    principal = authenticatedUser?.username ?: authentication?.name,
                     detail = mapOf(
                         "path" to request.requestURI,
                         "method" to request.method,
@@ -89,16 +108,46 @@ class AuthSecurityConfiguration {
                     )
                 )
             )
-            response.status = HttpServletResponse.SC_FORBIDDEN
-            response.contentType = "application/json;charset=UTF-8"
-            response.writer.write("""{"code":"AUTH_403001","message":"Forbidden","data":null}""")
+            writeJsonError(
+                response = response,
+                status = HttpServletResponse.SC_FORBIDDEN,
+                code = "AUTH_403001",
+                message = messageSource.getMessage("auth.accessDenied", null, requestLocale(request)),
+                objectMapper = objectMapper
+            )
         }
 
     @Bean
-    fun authenticationEntryPoint(): AuthenticationEntryPoint =
-        AuthenticationEntryPoint { _, response, _ ->
-            response.status = HttpServletResponse.SC_UNAUTHORIZED
-            response.contentType = "application/json;charset=UTF-8"
-            response.writer.write("""{"code":"AUTH_401002","message":"Unauthorized","data":null}""")
+    fun authenticationEntryPoint(
+        messageSource: MessageSource,
+        objectMapper: ObjectMapper
+    ): AuthenticationEntryPoint =
+        AuthenticationEntryPoint { request, response, _ ->
+            writeJsonError(
+                response = response,
+                status = HttpServletResponse.SC_UNAUTHORIZED,
+                code = "AUTH_401002",
+                message = messageSource.getMessage("auth.unauthorized", null, requestLocale(request)),
+                objectMapper = objectMapper
+            )
         }
+
+    private fun writeJsonError(
+        response: HttpServletResponse,
+        status: Int,
+        code: String,
+        message: String,
+        objectMapper: ObjectMapper
+    ) {
+        response.status = status
+        response.contentType = "application/json;charset=UTF-8"
+        response.writer.write(objectMapper.writeValueAsString(ApiResponse<Nothing?>(code, message, null)))
+    }
+
+    private fun requestLocale(request: HttpServletRequest): Locale =
+        request.getHeader("Accept-Language")
+            ?.takeIf { it.isNotBlank() }
+            ?.let(Locale::forLanguageTag)
+            ?: request.locale
+            ?: Locale.getDefault()
 }

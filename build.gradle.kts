@@ -113,29 +113,28 @@ subprojects
                                 fun appendDependency(configurationName: String, scope: String) {
                                     project.configurations.findByName(configurationName)
                                         ?.allDependencies
-                                        ?.forEach { dependency ->
-                                            val coordinates = when (dependency) {
+                                        ?.mapNotNull { dependency ->
+                                            when (dependency) {
                                                 is ProjectDependency -> {
-                                                    val target = project.rootProject.findProject(dependency.path) ?: return@forEach
+                                                    val target = dependency.dependencyProject
                                                     Triple(target.group.toString(), target.name, target.version.toString())
                                                 }
                                                 else -> {
-                                                    val group = dependency.group ?: return@forEach
-                                                    val version = dependency.version ?: return@forEach
+                                                    val group = dependency.group ?: return@mapNotNull null
+                                                    val version = dependency.version ?: return@mapNotNull null
                                                     Triple(group, dependency.name, version)
                                                 }
                                             }
-
+                                        }
+                                        ?.forEach { coordinates ->
                                             val dependencyKey = "${coordinates.first}:${coordinates.second}:${coordinates.third}:$scope"
-                                            if (!seen.add(dependencyKey)) {
-                                                return@forEach
+                                            if (seen.add(dependencyKey)) {
+                                                val dependencyNode = dependenciesNode.appendNode("dependency")
+                                                dependencyNode.appendNode("groupId", coordinates.first)
+                                                dependencyNode.appendNode("artifactId", coordinates.second)
+                                                dependencyNode.appendNode("version", coordinates.third)
+                                                dependencyNode.appendNode("scope", scope)
                                             }
-
-                                            val dependencyNode = dependenciesNode.appendNode("dependency")
-                                            dependencyNode.appendNode("groupId", coordinates.first)
-                                            dependencyNode.appendNode("artifactId", coordinates.second)
-                                            dependencyNode.appendNode("version", coordinates.third)
-                                            dependencyNode.appendNode("scope", scope)
                                         }
                                 }
 

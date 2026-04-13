@@ -32,7 +32,6 @@ Current repository state:
 Requirements:
 
 - JDK 21
-- Gradle 9.4
 - PostgreSQL
 
 The demo currently uses:
@@ -44,8 +43,9 @@ The demo currently uses:
 Run:
 
 ```powershell
-& 'D:\gradle-9.4.0-bin\gradle-9.4.0\bin\gradle.bat' --no-daemon build
-D:\jdks\jdk-21.0.10+7\bin\java.exe -jar auth-demo\build\libs\auth-demo-0.1.0-SNAPSHOT.jar
+.\gradlew.bat --no-daemon build
+.\gradlew.bat :auth-demo:bootJar
+java -jar auth-demo\build\libs\auth-demo-0.1.0-SNAPSHOT.jar
 ```
 
 Demo config is in [`auth-demo/src/main/resources/application.yml`](/d:/source/auth-starter/auth-demo/src/main/resources/application.yml).
@@ -92,22 +92,35 @@ auth-module:
     enabled: true
 ```
 
+## Error Messages
+
+- the starter ships with English default messages only
+- authentication, validation, QR, JWT, and common social-login errors resolve through Spring `MessageSource`
+- host applications can override the default messages by providing the same message keys in their own resource bundles
+- the default bundle lives in [`auth-security/src/main/resources/messages.properties`](/d:/source/auth-starter/auth-security/src/main/resources/messages.properties)
+
 ## Current Behavior
 
 - changing or resetting password increments `password_version`
 - old tokens are rejected after password changes
 - logout blacklists access and refresh tokens
+- refresh now parses a refresh token once before issuing the next token pair
+- password-version checks use a short in-memory cache to reduce repeated lookups
 - password failures can lock the account
 - QR login supports `PENDING`, `SCANNED`, `APPROVED`, `CANCELED`, `EXPIRED`, `CONSUMED`
 - QR flow endpoints include `scan`, `confirm`, and `cancel`
 - expired QR scenes can be cleaned up from JDBC storage
 - group roles can inherit permissions to users in the same group
+- user and group management queries batch-load role assignments instead of using per-row lookups
+- role assignment writes use batch SQL and registration-style multi-table writes are transactional
 - tenant-scoped management queries default to the caller tenant unless the caller is `SUPER_ADMIN`
 - Google can run in real ID-token verification mode when `auth-module.social.google.enabled=true`
 - `/auth/social/google` is the stable Google login endpoint, while `/auth/social/google/mock` remains available for demo use
 - WeChat can run in real code-exchange mode when `auth-module.social.wechat.enabled=true`
 - `/auth/social/wechat` is the stable WeChat login endpoint, while `/auth/social/wechat/mock` remains available for demo use
 - management APIs now also enforce method-level permissions
+- `401` and `403` responses use the same `ApiResponse` JSON envelope as controller exceptions
+- access-denied events are audited for both filter-level and method-level authorization failures
 - social login is provider-based and can be filtered by configuration
 - demo tests include an H2-backed integration path and a PostgreSQL Testcontainers path
 - PostgreSQL container tests automatically skip when Docker is unavailable

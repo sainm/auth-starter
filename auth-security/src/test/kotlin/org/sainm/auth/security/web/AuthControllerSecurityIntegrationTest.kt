@@ -1,6 +1,7 @@
 package org.sainm.auth.security.web
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import org.junit.jupiter.api.Test
 import org.sainm.auth.core.domain.LoginCommand
 import org.sainm.auth.core.domain.TokenPair
@@ -29,19 +30,21 @@ import org.sainm.auth.core.spi.UserRegistrationService
 import org.sainm.auth.core.spi.UserSummary
 import org.sainm.auth.security.config.AuthSecurityConfiguration
 import org.sainm.auth.security.handler.AuthenticationDispatcher
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
+import org.springframework.context.annotation.Primary
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
-import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.context.annotation.Primary
 import kotlin.test.assertEquals
 
 @SpringBootTest(classes = [AuthControllerSecurityIntegrationTest.TestApplication::class])
@@ -54,10 +57,15 @@ class AuthControllerSecurityIntegrationTest {
     @Autowired
     private lateinit var userAdminService: RecordingUserAdminService
 
+    @Autowired
+    private lateinit var auditEventPublisher: RecordingAuditEventPublisher
+
     @Test
     fun `users endpoint returns unauthorized without token`() {
         mockMvc.perform(get("/auth/users"))
             .andExpect(status().isUnauthorized)
+            .andExpect(jsonPath("$.code").value("AUTH_401002"))
+            .andExpect(jsonPath("$.message").value("Unauthorized"))
     }
 
     @Test
@@ -66,7 +74,14 @@ class AuthControllerSecurityIntegrationTest {
             get("/auth/users")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer limited-token")
                 .with(csrf())
-        ).andExpect(status().isForbidden)
+        )
+            .andExpect(status().isForbidden)
+            .andExpect(jsonPath("$.code").value("AUTH_403001"))
+            .andExpect(jsonPath("$.message").value("Access denied"))
+
+        assertEquals("user2", auditEventPublisher.lastEvent?.principal)
+        assertEquals(2L, auditEventPublisher.lastEvent?.userId)
+        assertEquals("ACCESS_DENIED", auditEventPublisher.lastEvent?.type)
     }
 
     @Test
@@ -93,12 +108,36 @@ class AuthControllerSecurityIntegrationTest {
         assertEquals(99L, userAdminService.lastTenantId)
     }
 
+    @Test
+    fun `validation message uses english default`() {
+        mockMvc.perform(
+            post("/auth/register")
+                .contentType(MediaType.APPLICATION_JSON)
+                .header(HttpHeaders.ACCEPT_LANGUAGE, "en-US")
+                .content("""{"username":"","password":""}""")
+                .with(csrf())
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.message").value("This field must not be blank"))
+    }
+
+    @Test
+    fun `disabled qr login message uses english default`() {
+        mockMvc.perform(
+            post("/auth/qr/scene")
+                .header(HttpHeaders.ACCEPT_LANGUAGE, "zh-CN")
+                .with(csrf())
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.message").value("QR login is disabled"))
+    }
+
     @SpringBootApplication
     @Import(AuthSecurityConfiguration::class, AuthController::class, AuthExceptionHandler::class)
     class TestApplication {
 
         @Bean
-        fun objectMapper(): ObjectMapper = ObjectMapper()
+        fun objectMapper(): ObjectMapper = ObjectMapper().registerKotlinModule()
 
         @Bean
         fun tokenService(): TokenService = object : TokenService {
@@ -156,9 +195,7 @@ class AuthControllerSecurityIntegrationTest {
         }
 
         @Bean
-        fun auditEventPublisher(): AuditEventPublisher = object : AuditEventPublisher {
-            override fun publish(event: AuditEvent) = Unit
-        }
+        fun auditEventPublisher(): RecordingAuditEventPublisher = RecordingAuditEventPublisher()
 
         @Bean
         fun auditQueryService(): AuditQueryService = object : AuditQueryService {
@@ -196,6 +233,14 @@ class AuthControllerSecurityIntegrationTest {
         override fun listPermissions(tenantId: Long?): List<PermissionSummary> = emptyList()
 
         override fun assignRoles(command: RoleAssignmentCommand): Set<String> = command.roleCodes
+    }
+
+    class RecordingAuditEventPublisher : AuditEventPublisher {
+        var lastEvent: AuditEvent? = null
+
+        override fun publish(event: AuditEvent) {
+            lastEvent = event
+        }
     }
 }
 

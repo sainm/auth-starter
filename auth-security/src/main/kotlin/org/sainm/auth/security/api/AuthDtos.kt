@@ -4,9 +4,9 @@ import jakarta.validation.constraints.NotBlank
 import org.sainm.auth.core.domain.UserPrincipal
 
 data class PasswordLoginRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val principal: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val password: String
 )
 
@@ -19,19 +19,19 @@ data class AuthResponse(
 )
 
 data class RefreshTokenRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val refreshToken: String
 )
 
 data class LogoutRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val refreshToken: String
 )
 
 data class RegisterRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val username: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val password: String,
     val email: String? = null,
     val mobile: String? = null,
@@ -49,16 +49,16 @@ data class RoleAssignRequest(
 )
 
 data class CreateTenantRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val tenantCode: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val tenantName: String
 )
 
 data class CreateGroupRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val groupCode: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val groupName: String,
     val tenantId: Long? = null,
     val parentId: Long? = null
@@ -78,35 +78,35 @@ data class QrSceneResponse(
 )
 
 data class QrScanRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val sceneCode: String
 )
 
 data class QrConfirmRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val sceneCode: String
 )
 
 data class QrCancelRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val sceneCode: String
 )
 
 data class SocialLoginRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val authCode: String
 )
 
 data class ChangePasswordRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val oldPassword: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val newPassword: String
 )
 
 data class ResetPasswordRequest(
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val principal: String,
-    @field:NotBlank
+    @field:NotBlank(message = "{auth.validation.notBlank}")
     val newPassword: String
 )
