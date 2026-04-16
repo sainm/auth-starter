@@ -12,6 +12,8 @@ import org.sainm.auth.core.domain.TokenPair
 import org.sainm.auth.core.domain.UserPrincipal
 import org.sainm.auth.core.domain.UserStatus
 import org.sainm.auth.core.exception.InvalidTokenException
+import org.sainm.auth.core.spi.SessionManagementService
+import org.sainm.auth.core.spi.SessionOpenCommand
 import org.sainm.auth.core.spi.TokenBlacklistService
 import org.sainm.auth.core.spi.TokenService
 import org.sainm.auth.core.spi.UserLookupService
@@ -24,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap
 class JwtTokenService(
     private val properties: JwtTokenProperties,
     private val tokenBlacklistService: TokenBlacklistService? = null,
+    private val sessionManagementService: SessionManagementService? = null,
     private val userLookupService: UserLookupService? = null,
     private val clock: Clock = Clock.systemUTC(),
     private val passwordVersionCacheTtlSeconds: Long = 30
@@ -35,9 +38,10 @@ class JwtTokenService(
         val now = Instant.now(clock)
         val accessExpiresAt = now.plusSeconds(properties.accessTokenExpireMinutes * 60)
         val refreshExpiresAt = now.plusSeconds(properties.refreshTokenExpireDays * 24 * 60 * 60)
+        val principal = prepareSessionAwarePrincipal(userPrincipal, accessExpiresAt, refreshExpiresAt)
         return TokenPair(
-            accessToken = createToken(userPrincipal, now, accessExpiresAt, "access"),
-            refreshToken = createToken(userPrincipal, now, refreshExpiresAt, "refresh"),
+            accessToken = createToken(principal, now, accessExpiresAt, "access"),
+            refreshToken = createToken(principal, now, refreshExpiresAt, "refresh"),
             expiresIn = properties.accessTokenExpireMinutes * 60
         )
     }
@@ -75,7 +79,10 @@ class JwtTokenService(
             tenantId = getLongClaimSafely("tenantId"),
             roles = getStringListClaim("roles")?.toSet().orEmpty(),
             permissions = getStringListClaim("permissions")?.toSet().orEmpty(),
-            attributes = mapOf("passwordVersion" to getIntegerClaim("passwordVersion"))
+            attributes = buildMap {
+                put("passwordVersion", getIntegerClaim("passwordVersion"))
+                getStringClaim("sid")?.let { put("sessionId", it) }
+            }
         )
 
     private fun createToken(
@@ -99,6 +106,7 @@ class JwtTokenService(
             .claim("permissions", principal.permissions.toList())
             .claim("tokenUse", tokenUse)
             .claim("passwordVersion", (principal.attributes["passwordVersion"] as? Number)?.toInt() ?: 1)
+            .claim("sid", principal.attributes["sessionId"] as? String)
             .build()
 
         val jwt = SignedJWT(
@@ -121,6 +129,7 @@ class JwtTokenService(
         if (jti != null && tokenBlacklistService?.isBlacklisted(jti) == true) {
             throw InvalidTokenException()
         }
+        validateSession(claims)
         validatePasswordVersion(claims)
         return claims
     }
@@ -139,6 +148,14 @@ class JwtTokenService(
         val currentPasswordVersion = currentPasswordVersion(userId) ?: tokenPasswordVersion
         if (currentPasswordVersion > tokenPasswordVersion) {
             throw InvalidTokenException("auth.token.passwordVersion.invalid")
+        }
+    }
+
+    private fun validateSession(claims: JWTClaimsSet) {
+        val sessionId = claims.getStringClaim("sid") ?: return
+        val userId = claims.subject?.toLongOrNull() ?: return
+        if (sessionManagementService?.isSessionActive(sessionId, userId) == false) {
+            throw InvalidTokenException("auth.session.invalid")
         }
     }
 
@@ -162,6 +179,45 @@ class JwtTokenService(
             expiresAtEpochSecond = now + passwordVersionCacheTtlSeconds.coerceAtLeast(1)
         )
         return version
+    }
+
+    private fun prepareSessionAwarePrincipal(
+        principal: UserPrincipal,
+        accessExpiresAt: Instant,
+        refreshExpiresAt: Instant
+    ): UserPrincipal {
+        val existingSessionId = principal.attributes["sessionId"] as? String
+        if (!existingSessionId.isNullOrBlank()) {
+            sessionManagementService?.touchSession(
+                sessionId = existingSessionId,
+                userId = principal.userId,
+                accessExpireAtEpochSecond = accessExpiresAt.epochSecond,
+                refreshExpireAtEpochSecond = refreshExpiresAt.epochSecond
+            )
+            return principal
+        }
+
+        val service = sessionManagementService ?: return principal
+        val context = service.openSession(
+            SessionOpenCommand(
+                userId = principal.userId,
+                username = principal.username,
+                tenantId = principal.tenantId,
+                clientId = principal.attributes["clientId"] as? String,
+                deviceType = principal.attributes["deviceType"] as? String,
+                deviceName = principal.attributes["deviceName"] as? String,
+                userAgent = principal.attributes["userAgent"] as? String,
+                ip = principal.attributes["ip"] as? String,
+                accessExpireAtEpochSecond = accessExpiresAt.epochSecond,
+                refreshExpireAtEpochSecond = refreshExpiresAt.epochSecond
+            )
+        )
+        return principal.copy(
+            attributes = principal.attributes + mapOf(
+                "sessionId" to context.sessionId,
+                "sessionPolicy" to context.policy.name
+            )
+        )
     }
 }
 

@@ -68,6 +68,8 @@ data class LoginAttemptResult(
 interface AuditQueryService {
     fun findLoginLogs(page: Int, size: Int, principal: String? = null, result: String? = null): List<LoginLogRecord>
     fun findSecurityEvents(page: Int, size: Int, eventType: String? = null): List<SecurityEventRecord>
+    fun findMyLoginActivities(userId: Long, principal: String, limit: Int = 10): List<MyLoginActivityRecord>
+    fun findMySecurityEvents(userId: Long, limit: Int = 10): List<MySecurityEventRecord>
 }
 
 data class LoginLogRecord(
@@ -86,6 +88,29 @@ data class SecurityEventRecord(
     val userId: Long?,
     val tenantId: Long?,
     val detailJson: String?,
+    val ip: String?,
+    val createdAt: String
+)
+
+data class MyLoginActivityRecord(
+    val id: Long,
+    val userId: Long?,
+    val principal: String?,
+    val loginType: String,
+    val result: String,
+    val ip: String?,
+    val userAgent: String?,
+    val location: String?,
+    val reason: String?,
+    val createdAt: String
+)
+
+data class MySecurityEventRecord(
+    val id: Long,
+    val eventType: String,
+    val userId: Long?,
+    val tenantId: Long?,
+    val detail: Map<String, Any?>,
     val ip: String?,
     val createdAt: String
 )
@@ -214,6 +239,60 @@ data class SocialIdentity(
 interface TokenBlacklistService {
     fun blacklist(jti: String, userId: Long, expireAtEpochSecond: Long)
     fun isBlacklisted(jti: String): Boolean
+}
+
+enum class SessionPolicyMode {
+    SINGLE_DEVICE,
+    MULTI_DEVICE
+}
+
+data class SessionOpenCommand(
+    val userId: Long,
+    val username: String,
+    val tenantId: Long?,
+    val clientId: String? = null,
+    val deviceType: String? = null,
+    val deviceName: String? = null,
+    val userAgent: String? = null,
+    val ip: String? = null,
+    val accessExpireAtEpochSecond: Long,
+    val refreshExpireAtEpochSecond: Long
+)
+
+data class SessionTokenContext(
+    val sessionId: String,
+    val policy: SessionPolicyMode
+)
+
+data class UserSessionSummary(
+    val sessionId: String,
+    val userId: Long,
+    val username: String,
+    val tenantId: Long?,
+    val clientId: String?,
+    val deviceType: String?,
+    val deviceName: String?,
+    val userAgent: String?,
+    val ip: String?,
+    val status: String,
+    val lastSeenAt: String?,
+    val accessExpireAt: String?,
+    val refreshExpireAt: String?,
+    val createdAt: String,
+    val updatedAt: String,
+    val revokedAt: String?,
+    val revokeReason: String?
+)
+
+interface SessionManagementService {
+    fun openSession(command: SessionOpenCommand): SessionTokenContext
+    fun touchSession(sessionId: String, userId: Long, accessExpireAtEpochSecond: Long, refreshExpireAtEpochSecond: Long): Boolean
+    fun isSessionActive(sessionId: String, userId: Long): Boolean
+    fun listSessions(userId: Long, limit: Int = 20): List<UserSessionSummary>
+    fun revokeSession(userId: Long, sessionId: String, reason: String? = null): Boolean
+    fun revokeOtherSessions(userId: Long, currentSessionId: String, reason: String? = null): Int
+    fun getPolicy(userId: Long): SessionPolicyMode
+    fun updatePolicy(userId: Long, policy: SessionPolicyMode): SessionPolicyMode
 }
 
 interface TokenService {

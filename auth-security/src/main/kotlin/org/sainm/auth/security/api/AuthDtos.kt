@@ -7,7 +7,10 @@ data class PasswordLoginRequest(
     @field:NotBlank(message = "{auth.validation.notBlank}")
     val principal: String,
     @field:NotBlank(message = "{auth.validation.notBlank}")
-    val password: String
+    val password: String,
+    val clientId: String? = null,
+    val deviceType: String? = null,
+    val deviceName: String? = null
 )
 
 data class AuthResponse(
@@ -16,6 +19,15 @@ data class AuthResponse(
     val tokenType: String,
     val expiresIn: Long,
     val user: UserPrincipal
+)
+
+data class CurrentUserProfileResponse(
+    val userId: Long,
+    val username: String,
+    val displayName: String?,
+    val sessionId: String?,
+    val roles: List<String>,
+    val permissions: List<String>
 )
 
 data class RefreshTokenRequest(
@@ -94,7 +106,10 @@ data class QrCancelRequest(
 
 data class SocialLoginRequest(
     @field:NotBlank(message = "{auth.validation.notBlank}")
-    val authCode: String
+    val authCode: String,
+    val clientId: String? = null,
+    val deviceType: String? = null,
+    val deviceName: String? = null
 )
 
 data class ChangePasswordRequest(
@@ -109,4 +124,57 @@ data class ResetPasswordRequest(
     val principal: String,
     @field:NotBlank(message = "{auth.validation.notBlank}")
     val newPassword: String
+)
+
+data class SessionSummaryResponse(
+    val sessionId: String,
+    val userId: Long,
+    val username: String,
+    val tenantId: Long?,
+    val clientId: String?,
+    val deviceType: String?,
+    val deviceName: String?,
+    val userAgent: String?,
+    val ip: String?,
+    val status: String,
+    val current: Boolean,
+    val lastSeenAt: String?,
+    val accessExpireAt: String?,
+    val refreshExpireAt: String?,
+    val createdAt: String,
+    val updatedAt: String,
+    val revokedAt: String?,
+    val revokeReason: String?
+)
+
+data class SessionPolicyResponse(
+    val policy: String
+)
+
+data class UpdateSessionPolicyRequest(
+    @field:NotBlank(message = "{auth.validation.notBlank}")
+    val policy: String
+)
+
+data class LoginActivityResponse(
+    val id: Long,
+    val userId: Long?,
+    val principal: String?,
+    val loginType: String,
+    val result: String,
+    val ip: String?,
+    val userAgent: String?,
+    val location: String?,
+    val reason: String?,
+    val createdAt: String
+)
+
+data class SecurityEventResponse(
+    val id: Long,
+    val eventType: String,
+    val userId: Long?,
+    val tenantId: Long?,
+    val detail: Map<String, Any?>,
+    val ip: String?,
+    val createdAt: String
 )

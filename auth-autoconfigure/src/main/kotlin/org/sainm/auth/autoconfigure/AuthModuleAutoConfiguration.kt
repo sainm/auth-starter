@@ -13,6 +13,7 @@ import org.sainm.auth.core.spi.OrganizationService
 import org.sainm.auth.core.spi.PasswordManagementService
 import org.sainm.auth.core.spi.PermissionService
 import org.sainm.auth.core.spi.QrLoginService
+import org.sainm.auth.core.spi.SessionManagementService
 import org.sainm.auth.core.spi.SocialAccountService
 import org.sainm.auth.core.spi.SocialAuthProvider
 import org.sainm.auth.core.spi.SocialLoginService
@@ -27,6 +28,7 @@ import org.sainm.auth.persistence.JdbcLoginAttemptService
 import org.sainm.auth.persistence.JdbcOrganizationService
 import org.sainm.auth.persistence.JdbcPasswordManagementService
 import org.sainm.auth.persistence.JdbcPermissionService
+import org.sainm.auth.persistence.JdbcSessionManagementService
 import org.sainm.auth.persistence.JdbcSocialAccountService
 import org.sainm.auth.persistence.JdbcTokenBlacklistService
 import org.sainm.auth.persistence.JdbcUserAdminService
@@ -88,6 +90,7 @@ class AuthModuleAutoConfiguration {
     fun tokenService(
         properties: AuthModuleProperties,
         tokenBlacklistServiceProvider: ObjectProvider<TokenBlacklistService>,
+        sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
         userLookupServiceProvider: ObjectProvider<UserLookupService>
     ): TokenService =
         JwtTokenService(
@@ -98,6 +101,7 @@ class AuthModuleAutoConfiguration {
                 refreshTokenExpireDays = properties.security.jwt.refreshTokenExpireDays
             ),
             tokenBlacklistService = tokenBlacklistServiceProvider.ifAvailable,
+            sessionManagementService = sessionManagementServiceProvider.ifAvailable,
             userLookupService = userLookupServiceProvider.ifAvailable
         )
 
@@ -167,8 +171,8 @@ class AuthModuleAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(AuditQueryService::class)
-    fun jdbcAuditQueryService(jdbcTemplate: JdbcTemplate): AuditQueryService =
-        JdbcAuditQueryService(jdbcTemplate)
+    fun jdbcAuditQueryService(jdbcTemplate: JdbcTemplate, objectMapper: ObjectMapper): AuditQueryService =
+        JdbcAuditQueryService(jdbcTemplate, objectMapper)
 
     @Bean
     @ConditionalOnMissingBean(UserAdminService::class)
@@ -247,4 +251,9 @@ class AuthModuleAutoConfiguration {
     @ConditionalOnMissingBean(TokenBlacklistService::class)
     fun jdbcTokenBlacklistService(jdbcTemplate: JdbcTemplate): TokenBlacklistService =
         JdbcTokenBlacklistService(jdbcTemplate)
+
+    @Bean
+    @ConditionalOnMissingBean(SessionManagementService::class)
+    fun jdbcSessionManagementService(jdbcTemplate: JdbcTemplate): SessionManagementService =
+        JdbcSessionManagementService(jdbcTemplate)
 }

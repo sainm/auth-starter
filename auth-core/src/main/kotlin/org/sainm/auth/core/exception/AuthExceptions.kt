@@ -34,3 +34,12 @@ class PasswordValidationException(
     "AUTH_400003",
     *messageArgs
 )
+
+class SessionManagementException(
+    messageKey: String = "auth.session.invalid",
+    vararg messageArgs: Any
+) : AuthException(
+    if (messageKey.startsWith("auth.")) messageKey else "auth.session.invalid",
+    "AUTH_401005",
+    *messageArgs
+)

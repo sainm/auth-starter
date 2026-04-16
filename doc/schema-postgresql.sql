@@ -176,6 +176,43 @@ create table if not exists sys_token_blacklist (
 create unique index if not exists uk_sys_token_blacklist_jti on sys_token_blacklist (jti);
 create index if not exists idx_sys_token_blacklist_expire_at on sys_token_blacklist (expire_at);
 
+create table if not exists sys_user_session_policy (
+    id bigserial primary key,
+    user_id bigint not null,
+    policy_code varchar(32) not null,
+    created_at timestamp(3) not null default current_timestamp,
+    updated_at timestamp(3) not null default current_timestamp,
+    constraint uk_sys_user_session_policy_user unique (user_id),
+    constraint fk_sys_user_session_policy_user_id foreign key (user_id) references sys_user(id)
+);
+
+create table if not exists sys_user_session (
+    id bigserial primary key,
+    session_id varchar(64) not null,
+    user_id bigint not null,
+    username varchar(64) not null,
+    tenant_id bigint,
+    client_id varchar(128),
+    device_type varchar(32),
+    device_name varchar(128),
+    user_agent varchar(512),
+    ip varchar(64),
+    status varchar(32) not null default 'ACTIVE',
+    last_seen_at timestamp(3),
+    access_expire_at timestamp(3),
+    refresh_expire_at timestamp(3),
+    revoked_at timestamp(3),
+    revoke_reason varchar(64),
+    created_at timestamp(3) not null default current_timestamp,
+    updated_at timestamp(3) not null default current_timestamp,
+    constraint uk_sys_user_session_sid unique (session_id),
+    constraint fk_sys_user_session_user_id foreign key (user_id) references sys_user(id)
+);
+
+create index if not exists idx_sys_user_session_user_status on sys_user_session (user_id, status);
+create index if not exists idx_sys_user_session_refresh_expire_at on sys_user_session (refresh_expire_at);
+create index if not exists idx_sys_user_session_updated_at on sys_user_session (updated_at desc);
+
 create table if not exists sys_qr_scene (
     id bigserial primary key,
     scene_code varchar(64) not null,

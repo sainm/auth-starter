@@ -13,6 +13,8 @@ import org.sainm.auth.core.spi.AuditQueryService
 import org.sainm.auth.core.spi.AuthenticationHandler
 import org.sainm.auth.core.spi.GroupSummary
 import org.sainm.auth.core.spi.LoginLogRecord
+import org.sainm.auth.core.spi.MyLoginActivityRecord
+import org.sainm.auth.core.spi.MySecurityEventRecord
 import org.sainm.auth.core.spi.OrganizationService
 import org.sainm.auth.core.spi.PasswordManagementService
 import org.sainm.auth.core.spi.PermissionService
@@ -201,6 +203,8 @@ class AuthControllerSecurityIntegrationTest {
         fun auditQueryService(): AuditQueryService = object : AuditQueryService {
             override fun findLoginLogs(page: Int, size: Int, principal: String?, result: String?): List<LoginLogRecord> = emptyList()
             override fun findSecurityEvents(page: Int, size: Int, eventType: String?): List<SecurityEventRecord> = emptyList()
+            override fun findMyLoginActivities(userId: Long, principal: String, limit: Int): List<MyLoginActivityRecord> = emptyList()
+            override fun findMySecurityEvents(userId: Long, limit: Int): List<MySecurityEventRecord> = emptyList()
         }
 
         @Bean

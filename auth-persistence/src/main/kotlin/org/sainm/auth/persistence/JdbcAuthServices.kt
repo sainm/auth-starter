@@ -15,6 +15,8 @@ import org.sainm.auth.core.spi.CreateTenantCommand
 import org.sainm.auth.core.spi.GroupRoleAssignmentCommand
 import org.sainm.auth.core.spi.GroupSummary
 import org.sainm.auth.core.spi.LoginAttemptResult
+import org.sainm.auth.core.spi.MyLoginActivityRecord
+import org.sainm.auth.core.spi.MySecurityEventRecord
 import org.sainm.auth.core.spi.LoginAttemptService
 import org.sainm.auth.core.spi.LoginLogRecord
 import org.sainm.auth.core.spi.OrganizationService
@@ -24,11 +26,16 @@ import org.sainm.auth.core.spi.PasswordManagementService
 import org.sainm.auth.core.spi.ResetPasswordCommand
 import org.sainm.auth.core.spi.RoleAssignmentCommand
 import org.sainm.auth.core.spi.RoleSummary
+import org.sainm.auth.core.spi.SessionManagementService
+import org.sainm.auth.core.spi.SessionOpenCommand
+import org.sainm.auth.core.spi.SessionPolicyMode
+import org.sainm.auth.core.spi.SessionTokenContext
 import org.sainm.auth.core.spi.SecurityEventRecord
 import org.sainm.auth.core.spi.SocialAccountService
 import org.sainm.auth.core.spi.SocialIdentity
 import org.sainm.auth.core.spi.TenantSummary
 import org.sainm.auth.core.spi.TokenBlacklistService
+import org.sainm.auth.core.spi.UserSessionSummary
 import org.sainm.auth.core.spi.UserAdminService
 import org.sainm.auth.core.spi.UserCredentialView
 import org.sainm.auth.core.spi.UserLookupService
@@ -43,6 +50,7 @@ import org.springframework.transaction.annotation.Transactional
 import org.springframework.dao.EmptyResultDataAccessException
 import org.springframework.security.crypto.password.PasswordEncoder
 import java.sql.Statement
+import java.util.UUID
 
 class JdbcUserLookupService(
     private val jdbcTemplate: JdbcTemplate
@@ -517,7 +525,8 @@ class JdbcAuditEventPublisher(
 }
 
 class JdbcAuditQueryService(
-    private val jdbcTemplate: JdbcTemplate
+    private val jdbcTemplate: JdbcTemplate,
+    private val objectMapper: ObjectMapper
 ) : AuditQueryService {
 
     override fun findLoginLogs(page: Int, size: Int, principal: String?, result: String?): List<LoginLogRecord> {
@@ -590,6 +599,67 @@ class JdbcAuditQueryService(
             },
             *args.toTypedArray()
         )
+    }
+
+    override fun findMyLoginActivities(userId: Long, principal: String, limit: Int): List<MyLoginActivityRecord> =
+        jdbcTemplate.query(
+            """
+            select id, user_id, principal, login_type, result, ip, user_agent, location, reason, created_at
+            from sys_login_log
+            where user_id = ? or principal = ?
+            order by id desc
+            limit ?
+            """.trimIndent(),
+            { rs, _ ->
+                MyLoginActivityRecord(
+                    id = rs.getLong("id"),
+                    userId = rs.getNullableLong("user_id"),
+                    principal = rs.getString("principal"),
+                    loginType = rs.getString("login_type"),
+                    result = rs.getString("result"),
+                    ip = rs.getString("ip"),
+                    userAgent = rs.getString("user_agent"),
+                    location = rs.getString("location"),
+                    reason = rs.getString("reason"),
+                    createdAt = rs.getTimestamp("created_at").toInstant().toString()
+                )
+            },
+            userId,
+            principal,
+            limit.coerceIn(1, 50)
+        )
+
+    override fun findMySecurityEvents(userId: Long, limit: Int): List<MySecurityEventRecord> =
+        jdbcTemplate.query(
+            """
+            select id, event_type, user_id, tenant_id, detail_json, ip, created_at
+            from sys_security_event
+            where user_id = ?
+            order by id desc
+            limit ?
+            """.trimIndent(),
+            { rs, _ ->
+                MySecurityEventRecord(
+                    id = rs.getLong("id"),
+                    eventType = rs.getString("event_type"),
+                    userId = rs.getNullableLong("user_id"),
+                    tenantId = rs.getNullableLong("tenant_id"),
+                    detail = parseDetailJson(rs.getString("detail_json")),
+                    ip = rs.getString("ip"),
+                    createdAt = rs.getTimestamp("created_at").toInstant().toString()
+                )
+            },
+            userId,
+            limit.coerceIn(1, 50)
+        )
+
+    private fun parseDetailJson(raw: String?): Map<String, Any?> {
+        if (raw.isNullOrBlank()) {
+            return emptyMap()
+        }
+        return runCatching {
+            objectMapper.readValue(raw, object : com.fasterxml.jackson.core.type.TypeReference<Map<String, Any?>>() {})
+        }.getOrDefault(emptyMap())
     }
 }
 
@@ -1035,6 +1105,195 @@ class JdbcTokenBlacklistService(
         ) ?: false
 }
 
+class JdbcSessionManagementService(
+    private val jdbcTemplate: JdbcTemplate
+) : SessionManagementService {
+
+    override fun openSession(command: SessionOpenCommand): SessionTokenContext {
+        val policy = getPolicy(command.userId)
+        if (policy == SessionPolicyMode.SINGLE_DEVICE) {
+            revokeAllActiveSessions(command.userId, "POLICY_SINGLE_DEVICE")
+        }
+
+        val sessionId = UUID.randomUUID().toString()
+        jdbcTemplate.update(
+            """
+            insert into sys_user_session (
+                session_id, user_id, username, tenant_id, client_id, device_type, device_name, user_agent, ip,
+                status, last_seen_at, access_expire_at, refresh_expire_at, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', current_timestamp, to_timestamp(?), to_timestamp(?), current_timestamp, current_timestamp)
+            """.trimIndent(),
+            sessionId,
+            command.userId,
+            command.username,
+            command.tenantId,
+            normalize(command.clientId, 128),
+            normalize(command.deviceType, 32),
+            normalize(command.deviceName, 128),
+            normalize(command.userAgent, 512),
+            normalize(command.ip, 64),
+            command.accessExpireAtEpochSecond,
+            command.refreshExpireAtEpochSecond
+        )
+        return SessionTokenContext(sessionId = sessionId, policy = policy)
+    }
+
+    override fun touchSession(
+        sessionId: String,
+        userId: Long,
+        accessExpireAtEpochSecond: Long,
+        refreshExpireAtEpochSecond: Long
+    ): Boolean =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set last_seen_at = current_timestamp,
+                access_expire_at = to_timestamp(?),
+                refresh_expire_at = to_timestamp(?),
+                updated_at = current_timestamp
+            where session_id = ?
+              and user_id = ?
+              and status = 'ACTIVE'
+              and (revoked_at is null)
+            """.trimIndent(),
+            accessExpireAtEpochSecond,
+            refreshExpireAtEpochSecond,
+            sessionId,
+            userId
+        ) > 0
+
+    override fun isSessionActive(sessionId: String, userId: Long): Boolean =
+        jdbcTemplate.queryForObject(
+            """
+            select exists(
+                select 1
+                from sys_user_session
+                where session_id = ?
+                  and user_id = ?
+                  and status = 'ACTIVE'
+                  and revoked_at is null
+                  and refresh_expire_at > current_timestamp
+            )
+            """.trimIndent(),
+            Boolean::class.java,
+            sessionId,
+            userId
+        ) ?: false
+
+    override fun listSessions(userId: Long, limit: Int): List<UserSessionSummary> =
+        jdbcTemplate.query(
+            """
+            select
+                session_id,
+                user_id,
+                username,
+                tenant_id,
+                client_id,
+                device_type,
+                device_name,
+                user_agent,
+                ip,
+                status,
+                last_seen_at,
+                access_expire_at,
+                refresh_expire_at,
+                created_at,
+                updated_at,
+                revoked_at,
+                revoke_reason
+            from sys_user_session
+            where user_id = ?
+            order by
+                case when status = 'ACTIVE' and revoked_at is null and refresh_expire_at > current_timestamp then 0 else 1 end,
+                updated_at desc
+            limit ?
+            """.trimIndent(),
+            { rs, _ -> rs.toUserSessionSummary() },
+            userId,
+            limit.coerceIn(1, 100)
+        )
+
+    override fun revokeSession(userId: Long, sessionId: String, reason: String?): Boolean =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set status = 'REVOKED',
+                revoked_at = current_timestamp,
+                revoke_reason = ?,
+                updated_at = current_timestamp
+            where session_id = ?
+              and user_id = ?
+              and revoked_at is null
+            """.trimIndent(),
+            normalize(reason, 64),
+            sessionId,
+            userId
+        ) > 0
+
+    override fun revokeOtherSessions(userId: Long, currentSessionId: String, reason: String?): Int =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set status = 'REVOKED',
+                revoked_at = current_timestamp,
+                revoke_reason = ?,
+                updated_at = current_timestamp
+            where user_id = ?
+              and session_id <> ?
+              and revoked_at is null
+            """.trimIndent(),
+            normalize(reason, 64),
+            userId,
+            currentSessionId
+        )
+
+    override fun getPolicy(userId: Long): SessionPolicyMode =
+        jdbcTemplate.query(
+            """
+            select policy_code
+            from sys_user_session_policy
+            where user_id = ?
+            limit 1
+            """.trimIndent(),
+            { rs, _ -> rs.getString("policy_code") },
+            userId
+        ).firstOrNull()?.let(SessionPolicyMode::valueOf) ?: SessionPolicyMode.MULTI_DEVICE
+
+    override fun updatePolicy(userId: Long, policy: SessionPolicyMode): SessionPolicyMode {
+        jdbcTemplate.update(
+            """
+            insert into sys_user_session_policy (user_id, policy_code, created_at, updated_at)
+            values (?, ?, current_timestamp, current_timestamp)
+            on conflict (user_id) do update
+            set policy_code = excluded.policy_code,
+                updated_at = current_timestamp
+            """.trimIndent(),
+            userId,
+            policy.name
+        )
+        return policy
+    }
+
+    private fun revokeAllActiveSessions(userId: Long, reason: String) {
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set status = 'REVOKED',
+                revoked_at = current_timestamp,
+                revoke_reason = ?,
+                updated_at = current_timestamp
+            where user_id = ?
+              and revoked_at is null
+            """.trimIndent(),
+            reason,
+            userId
+        )
+    }
+
+    private fun normalize(value: String?, maxLength: Int): String? =
+        value?.trim()?.takeIf { it.isNotEmpty() }?.take(maxLength)
+}
+
 private fun java.sql.ResultSet.getNullableLong(columnLabel: String): Long? =
     getObject(columnLabel)?.let { (it as Number).toLong() }
 
@@ -1045,4 +1304,25 @@ private fun java.sql.PreparedStatement.setNullableLong(index: Int, value: Long?)
         setLong(index, value)
     }
 }
+
+private fun java.sql.ResultSet.toUserSessionSummary(): UserSessionSummary =
+    UserSessionSummary(
+        sessionId = getString("session_id"),
+        userId = getLong("user_id"),
+        username = getString("username"),
+        tenantId = getNullableLong("tenant_id"),
+        clientId = getString("client_id"),
+        deviceType = getString("device_type"),
+        deviceName = getString("device_name"),
+        userAgent = getString("user_agent"),
+        ip = getString("ip"),
+        status = getString("status"),
+        lastSeenAt = getTimestamp("last_seen_at")?.toInstant()?.toString(),
+        accessExpireAt = getTimestamp("access_expire_at")?.toInstant()?.toString(),
+        refreshExpireAt = getTimestamp("refresh_expire_at")?.toInstant()?.toString(),
+        createdAt = getTimestamp("created_at").toInstant().toString(),
+        updatedAt = getTimestamp("updated_at").toInstant().toString(),
+        revokedAt = getTimestamp("revoked_at")?.toInstant()?.toString(),
+        revokeReason = getString("revoke_reason")
+    )
 

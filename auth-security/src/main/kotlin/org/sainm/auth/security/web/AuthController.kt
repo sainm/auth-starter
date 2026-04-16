@@ -1,8 +1,11 @@
 package org.sainm.auth.security.web
 
 import jakarta.validation.Valid
+import jakarta.servlet.http.HttpServletRequest
 import org.sainm.auth.core.domain.PasswordLoginCommand
 import org.sainm.auth.core.exception.AuthenticatedUserNotFoundException
+import org.sainm.auth.core.spi.SessionManagementService
+import org.sainm.auth.core.spi.SessionPolicyMode
 import org.sainm.auth.core.spi.AuditEvent
 import org.sainm.auth.core.spi.AuditEventPublisher
 import org.sainm.auth.core.spi.AuditQueryService
@@ -25,10 +28,12 @@ import org.sainm.auth.core.spi.UserRegistrationService
 import org.sainm.auth.security.api.ApiResponse
 import org.sainm.auth.security.api.AuthResponse
 import org.sainm.auth.security.api.ChangePasswordRequest
+import org.sainm.auth.security.api.CurrentUserProfileResponse
 import org.sainm.auth.security.api.CreateGroupRequest
 import org.sainm.auth.security.api.CreateTenantRequest
 import org.sainm.auth.security.api.GroupRoleAssignRequest
 import org.sainm.auth.security.api.LogoutRequest
+import org.sainm.auth.security.api.LoginActivityResponse
 import org.sainm.auth.security.api.PasswordLoginRequest
 import org.sainm.auth.security.api.QrCancelRequest
 import org.sainm.auth.security.api.QrConfirmRequest
@@ -39,12 +44,17 @@ import org.sainm.auth.security.api.RegisterRequest
 import org.sainm.auth.security.api.RegisterResponse
 import org.sainm.auth.security.api.ResetPasswordRequest
 import org.sainm.auth.security.api.RoleAssignRequest
+import org.sainm.auth.security.api.SecurityEventResponse
+import org.sainm.auth.security.api.SessionPolicyResponse
+import org.sainm.auth.security.api.SessionSummaryResponse
 import org.sainm.auth.security.api.SocialLoginRequest
+import org.sainm.auth.security.api.UpdateSessionPolicyRequest
 import org.sainm.auth.security.handler.AuthenticationDispatcher
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.http.HttpHeaders
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.web.context.request.RequestAttributes
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
@@ -70,12 +80,16 @@ class AuthController(
     private val auditQueryService: AuditQueryService,
     private val userAdminService: UserAdminService,
     private val organizationService: OrganizationService,
+    private val sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
     private val qrLoginServiceProvider: ObjectProvider<QrLoginService>,
     private val socialLoginServiceProvider: ObjectProvider<SocialLoginService>
 ) {
 
     @PostMapping("/login/password")
-    fun passwordLogin(@Valid @RequestBody request: PasswordLoginRequest): ApiResponse<AuthResponse> {
+    fun passwordLogin(
+        @Valid @RequestBody request: PasswordLoginRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> {
         val result = authenticationDispatcher.dispatch(
             PasswordLoginCommand(
                 principal = request.principal,
@@ -83,38 +97,69 @@ class AuthController(
             )
         )
         return ApiResponse.ok(
-            AuthResponse(
-                accessToken = result.tokenPair.accessToken,
-                refreshToken = result.tokenPair.refreshToken,
-                tokenType = result.tokenPair.tokenType,
-                expiresIn = result.tokenPair.expiresIn,
-                user = result.user
+            buildAuthResponse(
+                result.user,
+                servletRequest,
+                request.clientId,
+                request.deviceType,
+                request.deviceName
             )
         )
     }
 
     @PostMapping("/social/google")
-    fun googleLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        ApiResponse.ok(buildAuthResponse(enrichUser(socialLoginService().authenticate("GOOGLE", request.authCode).userId)))
+    fun googleLogin(
+        @Valid @RequestBody request: SocialLoginRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> =
+        ApiResponse.ok(
+            buildAuthResponse(
+                enrichUser(socialLoginService().authenticate("GOOGLE", request.authCode).userId),
+                servletRequest,
+                request.clientId,
+                request.deviceType,
+                request.deviceName
+            )
+        )
 
     @PostMapping("/social/google/mock")
-    fun googleMockLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        googleLogin(request)
+    fun googleMockLogin(
+        @Valid @RequestBody request: SocialLoginRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> =
+        googleLogin(request, servletRequest)
 
     @PostMapping("/social/wechat")
-    fun wechatLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        ApiResponse.ok(buildAuthResponse(enrichUser(socialLoginService().authenticate("WECHAT", request.authCode).userId)))
+    fun wechatLogin(
+        @Valid @RequestBody request: SocialLoginRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> =
+        ApiResponse.ok(
+            buildAuthResponse(
+                enrichUser(socialLoginService().authenticate("WECHAT", request.authCode).userId),
+                servletRequest,
+                request.clientId,
+                request.deviceType,
+                request.deviceName
+            )
+        )
 
     @PostMapping("/social/wechat/mock")
-    fun wechatMockLogin(@Valid @RequestBody request: SocialLoginRequest): ApiResponse<AuthResponse> =
-        wechatLogin(request)
+    fun wechatMockLogin(
+        @Valid @RequestBody request: SocialLoginRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> =
+        wechatLogin(request, servletRequest)
 
     @PostMapping("/qr/scene")
     fun createQrScene(): ApiResponse<QrSceneResponse> =
         ApiResponse.ok(qrLoginService().createScene().toResponse())
 
     @GetMapping("/qr/scene/{sceneCode}")
-    fun getQrScene(@PathVariable sceneCode: String): ApiResponse<QrSceneResponse> {
+    fun getQrScene(
+        @PathVariable sceneCode: String,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<QrSceneResponse> {
         val consumed = qrLoginService().consumeScene(sceneCode)
         if (consumed != null) {
             val user = enrichUser(consumed.user.userId)
@@ -128,7 +173,7 @@ class AuthController(
             )
             return ApiResponse.ok(
                 consumed.scene.toResponse(
-                    auth = buildAuthResponse(user)
+                    auth = buildAuthResponse(user, servletRequest)
                 )
             )
         }
@@ -211,6 +256,8 @@ class AuthController(
         @Valid @RequestBody request: LogoutRequest,
         @RequestHeader(HttpHeaders.AUTHORIZATION, required = false) authorization: String?
     ): ApiResponse<Boolean> {
+        val currentSessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
+        val currentUserId = (SecurityContextHolder.getContext().authentication?.principal as? Long)
         authorization
             ?.takeIf { it.startsWith("Bearer ") }
             ?.removePrefix("Bearer ")
@@ -218,6 +265,9 @@ class AuthController(
             ?.takeIf { it.isNotEmpty() }
             ?.let(tokenService::invalidate)
         tokenService.invalidate(request.refreshToken)
+        if (!currentSessionId.isNullOrBlank() && currentUserId != null) {
+            sessionManagementServiceProvider.ifAvailable?.revokeSession(currentUserId, currentSessionId, "LOGOUT")
+        }
         return ApiResponse.ok(true)
     }
 
@@ -282,8 +332,127 @@ class AuthController(
     }
 
     @GetMapping("/me")
-    fun me(@AuthenticationPrincipal userId: Long?): ApiResponse<Any> =
-        ApiResponse.ok(enrichUser(userId ?: throw AuthenticatedUserNotFoundException()))
+    fun me(@AuthenticationPrincipal userId: Long?): ApiResponse<CurrentUserProfileResponse> {
+        val currentUser = enrichUser(userId ?: throw AuthenticatedUserNotFoundException())
+        val sessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
+        return ApiResponse.ok(
+            CurrentUserProfileResponse(
+                userId = currentUser.userId,
+                username = currentUser.username,
+                displayName = currentUser.displayName,
+                sessionId = sessionId,
+                roles = currentUser.roles.sorted(),
+                permissions = currentUser.permissions.sorted()
+            )
+        )
+    }
+
+    @GetMapping("/me/login-activities")
+    fun myLoginActivities(@AuthenticationPrincipal userId: Long?): ApiResponse<List<LoginActivityResponse>> {
+        val currentUser = enrichUser(userId ?: throw AuthenticatedUserNotFoundException())
+        return ApiResponse.ok(
+            auditQueryService.findMyLoginActivities(currentUser.userId, currentUser.username).map {
+                LoginActivityResponse(
+                    id = it.id,
+                    userId = it.userId,
+                    principal = it.principal,
+                    loginType = it.loginType,
+                    result = it.result,
+                    ip = it.ip,
+                    userAgent = it.userAgent,
+                    location = it.location,
+                    reason = it.reason,
+                    createdAt = it.createdAt
+                )
+            }
+        )
+    }
+
+    @GetMapping("/me/security-events")
+    fun mySecurityEvents(@AuthenticationPrincipal userId: Long?): ApiResponse<List<SecurityEventResponse>> {
+        val currentUser = enrichUser(userId ?: throw AuthenticatedUserNotFoundException())
+        return ApiResponse.ok(
+            auditQueryService.findMySecurityEvents(currentUser.userId).map {
+                SecurityEventResponse(
+                    id = it.id,
+                    eventType = it.eventType,
+                    userId = it.userId,
+                    tenantId = it.tenantId,
+                    detail = it.detail,
+                    ip = it.ip,
+                    createdAt = it.createdAt
+                )
+            }
+        )
+    }
+
+    @GetMapping("/me/sessions")
+    fun mySessions(@AuthenticationPrincipal userId: Long?): ApiResponse<List<SessionSummaryResponse>> {
+        val currentUserId = userId ?: throw AuthenticatedUserNotFoundException()
+        val currentSessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
+        val sessions = sessionManagementService().listSessions(currentUserId)
+        return ApiResponse.ok(
+            sessions.map {
+                SessionSummaryResponse(
+                    sessionId = it.sessionId,
+                    userId = it.userId,
+                    username = it.username,
+                    tenantId = it.tenantId,
+                    clientId = it.clientId,
+                    deviceType = it.deviceType,
+                    deviceName = it.deviceName,
+                    userAgent = it.userAgent,
+                    ip = it.ip,
+                    status = it.status,
+                    current = it.sessionId == currentSessionId,
+                    lastSeenAt = it.lastSeenAt,
+                    accessExpireAt = it.accessExpireAt,
+                    refreshExpireAt = it.refreshExpireAt,
+                    createdAt = it.createdAt,
+                    updatedAt = it.updatedAt,
+                    revokedAt = it.revokedAt,
+                    revokeReason = it.revokeReason
+                )
+            }
+        )
+    }
+
+    @PostMapping("/me/sessions/{sessionId}/revoke")
+    fun revokeMySession(
+        @AuthenticationPrincipal userId: Long?,
+        @PathVariable sessionId: String
+    ): ApiResponse<Boolean> =
+        ApiResponse.ok(sessionManagementService().revokeSession(userId ?: throw AuthenticatedUserNotFoundException(), sessionId, "SELF_REVOKE"))
+
+    @PostMapping("/me/sessions/revoke-others")
+    fun revokeOtherMySessions(@AuthenticationPrincipal userId: Long?): ApiResponse<Map<String, Int>> {
+        val currentUserId = userId ?: throw AuthenticatedUserNotFoundException()
+        val currentSessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
+            ?: throw AuthenticatedUserNotFoundException()
+        return ApiResponse.ok(
+            mapOf("revokedCount" to sessionManagementService().revokeOtherSessions(currentUserId, currentSessionId, "REVOKE_OTHERS"))
+        )
+    }
+
+    @GetMapping("/me/session-policy")
+    fun mySessionPolicy(@AuthenticationPrincipal userId: Long?): ApiResponse<SessionPolicyResponse> =
+        ApiResponse.ok(SessionPolicyResponse(sessionManagementService().getPolicy(userId ?: throw AuthenticatedUserNotFoundException()).name))
+
+    @PostMapping("/me/session-policy")
+    fun updateMySessionPolicy(
+        @AuthenticationPrincipal userId: Long?,
+        @Valid @RequestBody request: UpdateSessionPolicyRequest
+    ): ApiResponse<SessionPolicyResponse> {
+        val policy = runCatching { SessionPolicyMode.valueOf(request.policy.trim().uppercase()) }
+            .getOrElse { throw IllegalArgumentException("auth.session.policy.invalid") }
+        val currentUserId = userId ?: throw AuthenticatedUserNotFoundException()
+        val updated = sessionManagementService().updatePolicy(currentUserId, policy)
+        val currentSessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
+        if (policy == SessionPolicyMode.SINGLE_DEVICE && !currentSessionId.isNullOrBlank()) {
+            sessionManagementService().revokeOtherSessions(currentUserId, currentSessionId, "POLICY_SWITCH")
+        }
+        return ApiResponse.ok(SessionPolicyResponse(updated.name))
+    }
 
     @GetMapping("/admin/ping")
     fun adminPing(): ApiResponse<Map<String, Boolean>> = ApiResponse.ok(mapOf("ok" to true))
@@ -399,8 +568,24 @@ class AuthController(
             )
             ?: throw AuthenticatedUserNotFoundException()
 
-    private fun buildAuthResponse(user: org.sainm.auth.core.domain.UserPrincipal): AuthResponse {
-        val tokenPair = tokenService.generate(user)
+    private fun buildAuthResponse(
+        user: org.sainm.auth.core.domain.UserPrincipal,
+        request: HttpServletRequest,
+        clientId: String? = null,
+        deviceType: String? = null,
+        deviceName: String? = null
+    ): AuthResponse {
+        val tokenPair = tokenService.generate(
+            user.copy(
+                attributes = user.attributes + mapOf(
+                    "clientId" to clientId?.trim()?.takeIf { it.isNotEmpty() },
+                    "deviceType" to deviceType?.trim()?.takeIf { it.isNotEmpty() },
+                    "deviceName" to deviceName?.trim()?.takeIf { it.isNotEmpty() },
+                    "userAgent" to request.getHeader(HttpHeaders.USER_AGENT)?.trim()?.takeIf { it.isNotEmpty() },
+                    "ip" to request.remoteAddr?.trim()?.takeIf { it.isNotEmpty() }
+                )
+            )
+        )
         return AuthResponse(
             accessToken = tokenPair.accessToken,
             refreshToken = tokenPair.refreshToken,
@@ -415,6 +600,9 @@ class AuthController(
 
     private fun socialLoginService(): SocialLoginService =
         socialLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.social.disabled")
+
+    private fun sessionManagementService(): SessionManagementService =
+        sessionManagementServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.session.invalid")
 
     private fun scopedTenantId(principalUserId: Long?, requestedTenantId: Long?): Long? {
         val principal = principalUserId?.let(::enrichUser) ?: return requestedTenantId
@@ -452,4 +640,7 @@ class AuthController(
     companion object {
         private const val USER_CACHE_ATTRIBUTE = "auth.enrichedUsers"
     }
+
+    private fun currentAuthenticatedUser(): org.sainm.auth.core.domain.UserPrincipal? =
+        SecurityContextHolder.getContext().authentication?.credentials as? org.sainm.auth.core.domain.UserPrincipal
 }
