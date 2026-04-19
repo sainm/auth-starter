@@ -1,46 +1,32 @@
 # auth-starter
 
-`auth-starter` is a Spring Boot authentication and authorization starter built with Kotlin, Spring Security, and JDBC.
+`auth-starter` is a Kotlin-based Spring Boot authentication and authorization starter. It provides JWT auth, session management, admin APIs, audit, QR login, social login providers, and reusable device-governance APIs.
 
-Current repository state:
-
-- multi-module starter structure
-- JWT access and refresh token flow
-- password login, register, logout, refresh
-- password change and admin reset
-- login failure lock strategy
-- login log and security event audit
-- QR login first version
-- configurable Google and WeChat social login with mock fallbacks
-- starter auto-configuration and demo app
-
-## Modules
-
-- `auth-core`: domain and SPI
-- `auth-security`: controller, JWT, filters, handlers
-- `auth-persistence`: JDBC persistence defaults
-- `auth-qr`: QR login implementation
-- `auth-social-google`: Google ID token provider and mock Google provider
-- `auth-social-wechat`: WeChat code-exchange provider and mock fallback
-- `auth-audit`: fallback logging audit
-- `auth-autoconfigure`: Spring Boot auto-configuration
-- `auth-spring-boot-starter`: starter artifact
-- `auth-demo`: runnable sample app
-
-## Quick Start
-
-Requirements:
+## Requirements
 
 - JDK 21
 - PostgreSQL
 
-The demo currently uses:
+## Repository Modules
+
+- `auth-core`: domain models and SPI contracts
+- `auth-security`: HTTP APIs, filters, JWT, handlers
+- `auth-persistence`: JDBC persistence defaults
+- `auth-qr`: QR login implementation
+- `auth-social-google`: Google provider and mock fallback
+- `auth-social-wechat`: WeChat provider and mock fallback
+- `auth-audit`: default audit publisher
+- `auth-autoconfigure`: starter auto-configuration
+- `auth-spring-boot-starter`: starter artifact
+- `auth-demo`: runnable demo application
+
+## Quick Start
+
+The demo application defaults to:
 
 - database: `auth_starter`
 - username: `auth_starter_app`
-- password: `AuthStarter@2026`
-
-Run:
+- password: `PleaseChangeThisPassword`
 
 ```powershell
 .\gradlew.bat --no-daemon build
@@ -48,11 +34,9 @@ Run:
 java -jar auth-demo\build\libs\auth-demo-0.1.0-SNAPSHOT.jar
 ```
 
-Demo config is in [`auth-demo/src/main/resources/application.yml`](/d:/source/auth-starter/auth-demo/src/main/resources/application.yml).
+Demo config: [auth-demo/src/main/resources/application.yml](/D:/source/auth-starter/auth-demo/src/main/resources/application.yml)
 
-## Starter Configuration
-
-Main prefix:
+## Core Configuration
 
 ```yaml
 auth-module:
@@ -76,6 +60,17 @@ auth-module:
   qr-login:
     enabled: true
     ttl-seconds: 180
+    transport: http-polling
+  performance:
+    virtual-threads:
+      enabled: false
+      auth-executor-enabled: false
+      qr-listener-enabled: false
+  audit:
+    enabled: true
+    record-success-logins: true
+    record-failed-logins: true
+    record-access-denied: true
   security:
     jwt:
       secret: change-me-change-me-change-me-change-me
@@ -88,63 +83,54 @@ auth-module:
     lock-strategy:
       max-attempts: 5
       lock-duration-minutes: 30
-  audit:
+      ip-max-attempts: 20
+      captcha-threshold: 3
+  device-governance:
     enabled: true
+    device-stale-days: 30
+    session-stale-days: 30
+    required-push-token-device-types:
+      - ANDROID
+      - IOS
 ```
 
-## Error Messages
+## Device Governance
 
-- the starter ships with English default messages only
-- authentication, validation, QR, JWT, and common social-login errors resolve through Spring `MessageSource`
-- host applications can override the default messages by providing the same message keys in their own resource bundles
-- the default bundle lives in [`auth-security/src/main/resources/messages.properties`](/d:/source/auth-starter/auth-security/src/main/resources/messages.properties)
+`auth-starter` exposes reusable device-governance APIs, but the device endpoints are only registered when the host application provides a `DeviceGovernanceService` bean.
+
+Endpoints:
+
+- `GET /auth/me/devices`
+- `POST /auth/me/devices`
+- `POST /auth/me/devices/{deviceId}/deactivate`
+- `GET /auth/users/{userId}/devices`
+- `POST /auth/users/{userId}/devices/{deviceId}/deactivate`
+
+This keeps the starter generic while letting host applications decide how device profiles, push tokens, and linked auth sessions are stored.
 
 ## Current Behavior
 
-- changing or resetting password increments `password_version`
-- old tokens are rejected after password changes
-- logout blacklists access and refresh tokens
-- refresh now parses a refresh token once before issuing the next token pair
-- password-version checks use a short in-memory cache to reduce repeated lookups
-- password failures can lock the account
-- QR login supports `PENDING`, `SCANNED`, `APPROVED`, `CANCELED`, `EXPIRED`, `CONSUMED`
-- QR flow endpoints include `scan`, `confirm`, and `cancel`
-- expired QR scenes can be cleaned up from JDBC storage
-- group roles can inherit permissions to users in the same group
-- user and group management queries batch-load role assignments instead of using per-row lookups
-- role assignment writes use batch SQL and registration-style multi-table writes are transactional
-- tenant-scoped management queries default to the caller tenant unless the caller is `SUPER_ADMIN`
-- Google can run in real ID-token verification mode when `auth-module.social.google.enabled=true`
-- `/auth/social/google` is the stable Google login endpoint, while `/auth/social/google/mock` remains available for demo use
-- WeChat can run in real code-exchange mode when `auth-module.social.wechat.enabled=true`
-- `/auth/social/wechat` is the stable WeChat login endpoint, while `/auth/social/wechat/mock` remains available for demo use
-- management APIs now also enforce method-level permissions
-- `401` and `403` responses use the same `ApiResponse` JSON envelope as controller exceptions
-- access-denied events are audited for both filter-level and method-level authorization failures
-- social login is provider-based and can be filtered by configuration
-- demo tests include an H2-backed integration path and a PostgreSQL Testcontainers path
-- PostgreSQL container tests automatically skip when Docker is unavailable
+- password change and admin reset revoke recorded sessions
+- bearer requests update session activity with in-memory throttling and stale-entry pruning
+- login and session records support stable `deviceId`
+- admins can inspect and revoke user sessions
+- access-denied events are audited
+- Google and WeChat logins can run in real or mock mode
+- QR login supports scene lifecycle and cleanup
+- method-level authorization and tenant-scoped management are enabled
 
-## Publishing
+## Error Messages
 
-- non-demo modules now include `maven-publish` metadata and publication configuration
-- replace the placeholder SCM/developer metadata in [`gradle.properties`](/d:/source/auth-starter/gradle.properties) before a real release
-- local publication is verified with `publishToMavenLocal`
+- the starter ships with English default messages
+- host applications can override keys in their own `MessageSource`
+- default messages live in [auth-security/src/main/resources/messages.properties](/D:/source/auth-starter/auth-security/src/main/resources/messages.properties)
 
 ## Docs
 
-- [`doc/api.md`](/d:/source/auth-starter/doc/api.md)
-- [`doc/architecture.md`](/d:/source/auth-starter/doc/architecture.md)
-- [`doc/erd.md`](/d:/source/auth-starter/doc/erd.md)
-- [`doc/roadmap.md`](/d:/source/auth-starter/doc/roadmap.md)
-- [`doc/release.md`](/d:/source/auth-starter/doc/release.md)
-- [`doc/schema-postgresql.sql`](/d:/source/auth-starter/doc/schema-postgresql.sql)
-- [`doc/auth-starter-dev-kickoff.md`](/d:/source/auth-starter/doc/auth-starter-dev-kickoff.md)
-
-## What Is Still Next
-
-- real Google OAuth integration
-- richer WeChat profile enrichment after code exchange
-- Redis-backed QR concurrency control
-- tenant isolation context and deeper permission strategy
-- publish-ready starter documentation and release flow
+- [doc/api.md](/D:/source/auth-starter/doc/api.md)
+- [doc/architecture.md](/D:/source/auth-starter/doc/architecture.md)
+- [doc/erd.md](/D:/source/auth-starter/doc/erd.md)
+- [doc/roadmap.md](/D:/source/auth-starter/doc/roadmap.md)
+- [doc/release.md](/D:/source/auth-starter/doc/release.md)
+- [doc/schema-postgresql.sql](/D:/source/auth-starter/doc/schema-postgresql.sql)
+- [doc/auth-starter-dev-kickoff.md](/D:/source/auth-starter/doc/auth-starter-dev-kickoff.md)

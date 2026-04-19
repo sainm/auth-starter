@@ -127,6 +127,7 @@ create table if not exists sys_user_session (
     username varchar(64) not null,
     tenant_id bigint,
     client_id varchar(128),
+    device_id varchar(191),
     device_type varchar(32),
     device_name varchar(128),
     user_agent varchar(512),

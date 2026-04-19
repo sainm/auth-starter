@@ -5,7 +5,7 @@ spring:
   datasource:
     url: jdbc:postgresql://127.0.0.1:5432/auth_starter
     username: auth_starter_app
-    password: AuthStarter@2026
+    password: PleaseChangeThisPassword
     driver-class-name: org.postgresql.Driver
   sql:
     init:

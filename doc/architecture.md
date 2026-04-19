@@ -31,6 +31,7 @@
 2. `PasswordManagementService` validates password strength.
 3. JDBC layer updates `sys_auth.credential_hash`.
 4. JDBC layer increments `sys_user.password_version` and clears lock state.
+5. Controller revokes the user's recorded sessions with `PASSWORD_CHANGED` or `PASSWORD_RESET`.
 
 ### QR Login
 
@@ -64,4 +65,6 @@
 - Password failures increment `failed_login_attempts`.
 - `locked_until` blocks further password login attempts until expiry.
 - Management endpoints require `ADMIN` or `SUPER_ADMIN`.
+- Session governance now covers self-service session control, request-level `last_seen_at` activity touch, and admin-side session inspection/revocation.
+- Client apps can send a stable `deviceId` during login; the JWT/session pipeline preserves it so downstream modules can associate business-side device registration with auth sessions.
 - Management endpoints also enforce method-level permissions from the authenticated principal.

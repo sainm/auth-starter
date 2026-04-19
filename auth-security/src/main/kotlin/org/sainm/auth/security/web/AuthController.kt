@@ -39,6 +39,7 @@ import org.sainm.auth.security.api.QrCancelRequest
 import org.sainm.auth.security.api.QrConfirmRequest
 import org.sainm.auth.security.api.QrScanRequest
 import org.sainm.auth.security.api.QrSceneResponse
+import org.sainm.auth.security.api.RegistrationOptionsResponse
 import org.sainm.auth.security.api.RefreshTokenRequest
 import org.sainm.auth.security.api.RegisterRequest
 import org.sainm.auth.security.api.RegisterResponse
@@ -46,14 +47,17 @@ import org.sainm.auth.security.api.ResetPasswordRequest
 import org.sainm.auth.security.api.RoleAssignRequest
 import org.sainm.auth.security.api.SecurityEventResponse
 import org.sainm.auth.security.api.SessionPolicyResponse
+import org.sainm.auth.security.api.SessionRevokeResponse
 import org.sainm.auth.security.api.SessionSummaryResponse
 import org.sainm.auth.security.api.SocialLoginRequest
 import org.sainm.auth.security.api.UpdateSessionPolicyRequest
 import org.sainm.auth.security.handler.AuthenticationDispatcher
 import org.springframework.beans.factory.ObjectProvider
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpHeaders
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.security.access.AccessDeniedException
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.web.context.request.RequestAttributes
 import org.springframework.web.context.request.RequestContextHolder
@@ -82,7 +86,11 @@ class AuthController(
     private val organizationService: OrganizationService,
     private val sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
     private val qrLoginServiceProvider: ObjectProvider<QrLoginService>,
-    private val socialLoginServiceProvider: ObjectProvider<SocialLoginService>
+    private val socialLoginServiceProvider: ObjectProvider<SocialLoginService>,
+    @Value("\${auth-module.registration.self-service-enabled:false}")
+    private val selfRegistrationEnabled: Boolean,
+    @Value("\${auth-module.security.password.min-length:8}")
+    private val passwordMinLength: Int
 ) {
 
     @PostMapping("/login/password")
@@ -101,6 +109,7 @@ class AuthController(
                 result.user,
                 servletRequest,
                 request.clientId,
+                request.deviceId,
                 request.deviceType,
                 request.deviceName
             )
@@ -111,16 +120,19 @@ class AuthController(
     fun googleLogin(
         @Valid @RequestBody request: SocialLoginRequest,
         servletRequest: HttpServletRequest
-    ): ApiResponse<AuthResponse> =
-        ApiResponse.ok(
+    ): ApiResponse<AuthResponse> {
+        val user = socialAuthenticate("GOOGLE", request.authCode, servletRequest)
+        return ApiResponse.ok(
             buildAuthResponse(
-                enrichUser(socialLoginService().authenticate("GOOGLE", request.authCode).userId),
+                user,
                 servletRequest,
                 request.clientId,
+                request.deviceId,
                 request.deviceType,
                 request.deviceName
             )
         )
+    }
 
     @PostMapping("/social/google/mock")
     fun googleMockLogin(
@@ -133,16 +145,19 @@ class AuthController(
     fun wechatLogin(
         @Valid @RequestBody request: SocialLoginRequest,
         servletRequest: HttpServletRequest
-    ): ApiResponse<AuthResponse> =
-        ApiResponse.ok(
+    ): ApiResponse<AuthResponse> {
+        val user = socialAuthenticate("WECHAT", request.authCode, servletRequest)
+        return ApiResponse.ok(
             buildAuthResponse(
-                enrichUser(socialLoginService().authenticate("WECHAT", request.authCode).userId),
+                user,
                 servletRequest,
                 request.clientId,
+                request.deviceId,
                 request.deviceType,
                 request.deviceName
             )
         )
+    }
 
     @PostMapping("/social/wechat/mock")
     fun wechatMockLogin(
@@ -168,7 +183,19 @@ class AuthController(
                     type = "QR_CONSUMED",
                     userId = consumed.user.userId,
                     principal = consumed.user.username,
-                    detail = mapOf("sceneCode" to sceneCode)
+                    ip = clientIp(servletRequest),
+                    userAgent = clientUserAgent(servletRequest),
+                    detail = requestDetail(servletRequest, "sceneCode" to sceneCode)
+                )
+            )
+            auditEventPublisher.publish(
+                AuditEvent(
+                    type = "LOGIN_SUCCESS",
+                    userId = consumed.user.userId,
+                    principal = consumed.user.username,
+                    ip = clientIp(servletRequest),
+                    userAgent = clientUserAgent(servletRequest),
+                    detail = mapOf("loginType" to "QR")
                 )
             )
             return ApiResponse.ok(
@@ -185,7 +212,8 @@ class AuthController(
     @PostMapping("/qr/scan")
     fun scanQrScene(
         @AuthenticationPrincipal userId: Long?,
-        @Valid @RequestBody request: QrScanRequest
+        @Valid @RequestBody request: QrScanRequest,
+        servletRequest: HttpServletRequest
     ): ApiResponse<QrSceneResponse> {
         val principal = userId ?: throw AuthenticatedUserNotFoundException()
         val scene = qrLoginService().scanScene(request.sceneCode, principal)
@@ -195,7 +223,9 @@ class AuthController(
                 type = "QR_SCANNED",
                 userId = principal,
                 principal = user.username,
-                detail = mapOf("sceneCode" to request.sceneCode)
+                ip = clientIp(servletRequest),
+                userAgent = clientUserAgent(servletRequest),
+                detail = requestDetail(servletRequest, "sceneCode" to request.sceneCode)
             )
         )
         return ApiResponse.ok(scene.toResponse())
@@ -204,7 +234,8 @@ class AuthController(
     @PostMapping("/qr/confirm")
     fun confirmQrScene(
         @AuthenticationPrincipal userId: Long?,
-        @Valid @RequestBody request: QrConfirmRequest
+        @Valid @RequestBody request: QrConfirmRequest,
+        servletRequest: HttpServletRequest
     ): ApiResponse<QrSceneResponse> {
         val principal = userId ?: throw AuthenticatedUserNotFoundException()
         val scene = qrLoginService().confirmScene(request.sceneCode, principal)
@@ -214,7 +245,9 @@ class AuthController(
                 type = "QR_CONFIRMED",
                 userId = principal,
                 principal = user.username,
-                detail = mapOf("sceneCode" to request.sceneCode)
+                ip = clientIp(servletRequest),
+                userAgent = clientUserAgent(servletRequest),
+                detail = requestDetail(servletRequest, "sceneCode" to request.sceneCode)
             )
         )
         return ApiResponse.ok(scene.toResponse())
@@ -223,7 +256,8 @@ class AuthController(
     @PostMapping("/qr/cancel")
     fun cancelQrScene(
         @AuthenticationPrincipal userId: Long?,
-        @Valid @RequestBody request: QrCancelRequest
+        @Valid @RequestBody request: QrCancelRequest,
+        servletRequest: HttpServletRequest
     ): ApiResponse<QrSceneResponse> {
         val scene = qrLoginService().cancelScene(request.sceneCode, userId)
         val username = userId?.let { enrichUser(it).username }
@@ -232,7 +266,9 @@ class AuthController(
                 type = "QR_CANCELED",
                 userId = userId,
                 principal = username,
-                detail = mapOf("sceneCode" to request.sceneCode)
+                ip = clientIp(servletRequest),
+                userAgent = clientUserAgent(servletRequest),
+                detail = requestDetail(servletRequest, "sceneCode" to request.sceneCode)
             )
         )
         return ApiResponse.ok(scene.toResponse())
@@ -271,8 +307,18 @@ class AuthController(
         return ApiResponse.ok(true)
     }
 
+    @GetMapping("/register/options")
+    fun registrationOptions(): ApiResponse<RegistrationOptionsResponse> =
+        ApiResponse.ok(
+            RegistrationOptionsResponse(
+                selfServiceEnabled = selfRegistrationEnabled,
+                passwordMinLength = passwordMinLength
+            )
+        )
+
     @PostMapping("/register")
     fun register(@Valid @RequestBody request: RegisterRequest): ApiResponse<RegisterResponse> {
+        require(selfRegistrationEnabled) { "auth.register.disabled" }
         val result = userRegistrationService.register(
             UserRegistrationCommand(
                 username = request.username,
@@ -296,18 +342,20 @@ class AuthController(
         @AuthenticationPrincipal userId: Long?,
         @Valid @RequestBody request: ChangePasswordRequest
     ): ApiResponse<Boolean> {
-        passwordManagementService.changePassword(
+        val currentUserId = userId ?: throw AuthenticatedUserNotFoundException()
+        val changedUserId = passwordManagementService.changePassword(
             ChangePasswordCommand(
-                userId = userId ?: throw AuthenticatedUserNotFoundException(),
+                userId = currentUserId,
                 oldPassword = request.oldPassword,
                 newPassword = request.newPassword
             )
         )
-        val user = enrichUser(userId)
+        sessionManagementServiceProvider.ifAvailable?.revokeAllSessions(changedUserId, "PASSWORD_CHANGED")
+        val user = enrichUser(changedUserId)
         auditEventPublisher.publish(
             AuditEvent(
                 type = "PASSWORD_CHANGED",
-                userId = userId,
+                userId = changedUserId,
                 principal = user.username
             )
         )
@@ -316,15 +364,17 @@ class AuthController(
 
     @PostMapping("/password/reset")
     fun resetPassword(@Valid @RequestBody request: ResetPasswordRequest): ApiResponse<Boolean> {
-        passwordManagementService.resetPassword(
+        val resetUserId = passwordManagementService.resetPassword(
             ResetPasswordCommand(
                 principal = request.principal,
                 newPassword = request.newPassword
             )
         )
+        sessionManagementServiceProvider.ifAvailable?.revokeAllSessions(resetUserId, "PASSWORD_RESET")
         auditEventPublisher.publish(
             AuditEvent(
                 type = "PASSWORD_RESET",
+                userId = resetUserId,
                 principal = request.principal
             )
         )
@@ -341,6 +391,7 @@ class AuthController(
                 username = currentUser.username,
                 displayName = currentUser.displayName,
                 sessionId = sessionId,
+                deviceId = currentAuthenticatedUser()?.attributes?.get("deviceId") as? String,
                 roles = currentUser.roles.sorted(),
                 permissions = currentUser.permissions.sorted()
             )
@@ -391,30 +442,7 @@ class AuthController(
         val currentUserId = userId ?: throw AuthenticatedUserNotFoundException()
         val currentSessionId = currentAuthenticatedUser()?.attributes?.get("sessionId") as? String
         val sessions = sessionManagementService().listSessions(currentUserId)
-        return ApiResponse.ok(
-            sessions.map {
-                SessionSummaryResponse(
-                    sessionId = it.sessionId,
-                    userId = it.userId,
-                    username = it.username,
-                    tenantId = it.tenantId,
-                    clientId = it.clientId,
-                    deviceType = it.deviceType,
-                    deviceName = it.deviceName,
-                    userAgent = it.userAgent,
-                    ip = it.ip,
-                    status = it.status,
-                    current = it.sessionId == currentSessionId,
-                    lastSeenAt = it.lastSeenAt,
-                    accessExpireAt = it.accessExpireAt,
-                    refreshExpireAt = it.refreshExpireAt,
-                    createdAt = it.createdAt,
-                    updatedAt = it.updatedAt,
-                    revokedAt = it.revokedAt,
-                    revokeReason = it.revokeReason
-                )
-            }
-        )
+        return ApiResponse.ok(sessions.map { it.toResponse(currentSessionId) })
     }
 
     @PostMapping("/me/sessions/{sessionId}/revoke")
@@ -452,6 +480,36 @@ class AuthController(
             sessionManagementService().revokeOtherSessions(currentUserId, currentSessionId, "POLICY_SWITCH")
         }
         return ApiResponse.ok(SessionPolicyResponse(updated.name))
+    }
+
+    @GetMapping("/users/{userId}/sessions")
+    fun userSessions(
+        @AuthenticationPrincipal principalUserId: Long?,
+        @PathVariable userId: Long
+    ): ApiResponse<List<SessionSummaryResponse>> {
+        val targetUser = ensureManageableUser(principalUserId, userId)
+        val sessions = sessionManagementService().listSessions(targetUser.userId)
+        return ApiResponse.ok(sessions.map { it.toResponse(currentSessionId = null) })
+    }
+
+    @PostMapping("/users/{userId}/sessions/{sessionId}/revoke")
+    fun revokeUserSession(
+        @AuthenticationPrincipal principalUserId: Long?,
+        @PathVariable userId: Long,
+        @PathVariable sessionId: String
+    ): ApiResponse<Boolean> {
+        val targetUser = ensureManageableUser(principalUserId, userId)
+        return ApiResponse.ok(sessionManagementService().revokeSession(targetUser.userId, sessionId, "ADMIN_REVOKE"))
+    }
+
+    @PostMapping("/users/{userId}/sessions/revoke-all")
+    fun revokeAllUserSessions(
+        @AuthenticationPrincipal principalUserId: Long?,
+        @PathVariable userId: Long
+    ): ApiResponse<SessionRevokeResponse> {
+        val targetUser = ensureManageableUser(principalUserId, userId)
+        val revokedCount = sessionManagementService().revokeAllSessions(targetUser.userId, "ADMIN_REVOKE_ALL")
+        return ApiResponse.ok(SessionRevokeResponse(revokedCount))
     }
 
     @GetMapping("/admin/ping")
@@ -572,6 +630,7 @@ class AuthController(
         user: org.sainm.auth.core.domain.UserPrincipal,
         request: HttpServletRequest,
         clientId: String? = null,
+        deviceId: String? = null,
         deviceType: String? = null,
         deviceName: String? = null
     ): AuthResponse {
@@ -579,6 +638,7 @@ class AuthController(
             user.copy(
                 attributes = user.attributes + mapOf(
                     "clientId" to clientId?.trim()?.takeIf { it.isNotEmpty() },
+                    "deviceId" to deviceId?.trim()?.takeIf { it.isNotEmpty() },
                     "deviceType" to deviceType?.trim()?.takeIf { it.isNotEmpty() },
                     "deviceName" to deviceName?.trim()?.takeIf { it.isNotEmpty() },
                     "userAgent" to request.getHeader(HttpHeaders.USER_AGENT)?.trim()?.takeIf { it.isNotEmpty() },
@@ -643,4 +703,88 @@ class AuthController(
 
     private fun currentAuthenticatedUser(): org.sainm.auth.core.domain.UserPrincipal? =
         SecurityContextHolder.getContext().authentication?.credentials as? org.sainm.auth.core.domain.UserPrincipal
+
+    private fun ensureManageableUser(
+        principalUserId: Long?,
+        targetUserId: Long
+    ): org.sainm.auth.core.domain.UserPrincipal {
+        val operator = enrichUser(principalUserId ?: throw AuthenticatedUserNotFoundException())
+        val target = enrichUser(targetUserId)
+        if ("SUPER_ADMIN" !in operator.roles && operator.tenantId != target.tenantId) {
+            throw AccessDeniedException("auth.accessDenied")
+        }
+        return target
+    }
+
+    private fun socialAuthenticate(
+        provider: String,
+        authCode: String,
+        request: HttpServletRequest
+    ): org.sainm.auth.core.domain.UserPrincipal =
+        runCatching {
+            enrichUser(socialLoginService().authenticate(provider, authCode).userId)
+        }.onSuccess { user ->
+            auditEventPublisher.publish(
+                AuditEvent(
+                    type = "LOGIN_SUCCESS",
+                    userId = user.userId,
+                    principal = user.username,
+                    ip = clientIp(request),
+                    userAgent = clientUserAgent(request),
+                    detail = mapOf("loginType" to provider)
+                )
+            )
+        }.onFailure { error ->
+            auditEventPublisher.publish(
+                AuditEvent(
+                    type = "LOGIN_FAIL",
+                    principal = provider.lowercase(),
+                    ip = clientIp(request),
+                    userAgent = clientUserAgent(request),
+                    detail = mapOf(
+                        "loginType" to provider,
+                        "reason" to (error.message ?: "social_auth_failed")
+                    )
+                )
+            )
+        }.getOrThrow()
+
+    private fun requestDetail(
+        request: HttpServletRequest,
+        vararg pairs: Pair<String, Any?>
+    ): Map<String, Any?> =
+        linkedMapOf<String, Any?>().apply {
+            putAll(pairs)
+            clientUserAgent(request)?.let { put("userAgent", it) }
+        }
+
+    private fun clientIp(request: HttpServletRequest): String? =
+        request.remoteAddr?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun clientUserAgent(request: HttpServletRequest): String? =
+        request.getHeader(HttpHeaders.USER_AGENT)?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun org.sainm.auth.core.spi.UserSessionSummary.toResponse(currentSessionId: String?): SessionSummaryResponse =
+        SessionSummaryResponse(
+            sessionId = sessionId,
+            userId = userId,
+            username = username,
+            tenantId = tenantId,
+            clientId = clientId,
+            deviceId = deviceId,
+            deviceType = deviceType,
+            deviceName = deviceName,
+            userAgent = userAgent,
+            ip = ip,
+            status = status,
+            current = sessionId == currentSessionId,
+            lastSeenAt = lastSeenAt,
+            accessExpireAt = accessExpireAt,
+            refreshExpireAt = refreshExpireAt,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            revokedAt = revokedAt,
+            revokeReason = revokeReason
+        )
+
 }

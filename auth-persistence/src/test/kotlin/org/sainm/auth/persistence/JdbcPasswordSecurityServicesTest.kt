@@ -24,6 +24,7 @@ class JdbcPasswordSecurityServicesTest {
     private val passwordEncoder = PasswordEncoderFactories.createDelegatingPasswordEncoder()
 
     init {
+        jdbcTemplate.execute("drop table if exists sys_user_session")
         jdbcTemplate.execute("drop table if exists sys_auth")
         jdbcTemplate.execute("drop table if exists sys_user")
         jdbcTemplate.execute(
@@ -46,6 +47,30 @@ class JdbcPasswordSecurityServicesTest {
         )
         jdbcTemplate.execute(
             """
+            create table sys_user_session (
+                session_id varchar(64) primary key,
+                user_id bigint not null,
+                username varchar(64) not null,
+                tenant_id bigint,
+                client_id varchar(128),
+                device_id varchar(128),
+                device_type varchar(32),
+                device_name varchar(128),
+                user_agent varchar(512),
+                ip varchar(64),
+                status varchar(16) not null,
+                last_seen_at timestamp,
+                access_expire_at timestamp,
+                refresh_expire_at timestamp,
+                created_at timestamp default current_timestamp,
+                updated_at timestamp default current_timestamp,
+                revoked_at timestamp,
+                revoke_reason varchar(64)
+            )
+            """.trimIndent()
+        )
+        jdbcTemplate.execute(
+            """
             create table sys_auth (
                 id bigserial primary key,
                 user_id bigint not null,
@@ -61,6 +86,7 @@ class JdbcPasswordSecurityServicesTest {
 
     @BeforeTest
     fun resetData() {
+        jdbcTemplate.update("delete from sys_user_session")
         jdbcTemplate.update("delete from sys_auth")
         jdbcTemplate.update("delete from sys_user")
     }
@@ -70,7 +96,7 @@ class JdbcPasswordSecurityServicesTest {
         seedUser("alice", "P@ssw0rd1")
         val service = JdbcPasswordManagementService(jdbcTemplate, passwordEncoder, 8)
 
-        service.changePassword(ChangePasswordCommand(1L, "P@ssw0rd1", "NewPass9"))
+        val userId = service.changePassword(ChangePasswordCommand(1L, "P@ssw0rd1", "NewPass9"))
 
         val hash = jdbcTemplate.queryForObject(
             "select credential_hash from sys_auth where user_id = 1",
@@ -80,6 +106,7 @@ class JdbcPasswordSecurityServicesTest {
             "select password_version from sys_user where id = 1",
             Int::class.java
         )!!
+        assertEquals(1L, userId)
         assertTrue(passwordEncoder.matches("NewPass9", hash))
         assertEquals(2, version)
     }
@@ -114,6 +141,78 @@ class JdbcPasswordSecurityServicesTest {
         )
         assertEquals(0, (row["failed_login_attempts"] as Number).toInt())
         assertEquals(null, row["locked_until"])
+    }
+
+    @Test
+    fun `revoke all sessions marks every active session as revoked`() {
+        seedUser("delta", "P@ssw0rd1")
+        jdbcTemplate.update(
+            """
+            insert into sys_user_session (
+                session_id, user_id, username, status, created_at, updated_at
+            ) values
+                ('s1', 1, 'delta', 'ACTIVE', current_timestamp, current_timestamp),
+                ('s2', 1, 'delta', 'ACTIVE', current_timestamp, current_timestamp)
+            """.trimIndent()
+        )
+        val service = JdbcSessionManagementService(jdbcTemplate)
+
+        val revokedCount = service.revokeAllSessions(1L, "PASSWORD_CHANGED")
+
+        assertEquals(2, revokedCount)
+        val rows = jdbcTemplate.queryForList(
+            "select status, revoke_reason from sys_user_session where user_id = 1 order by session_id"
+        )
+        assertEquals(listOf("REVOKED", "REVOKED"), rows.map { it["status"] })
+        assertEquals(listOf("PASSWORD_CHANGED", "PASSWORD_CHANGED"), rows.map { it["revoke_reason"] })
+    }
+
+    @Test
+    fun `find latest session by device returns newest device session`() {
+        seedUser("echo", "P@ssw0rd1")
+        jdbcTemplate.update(
+            """
+            insert into sys_user_session (
+                session_id, user_id, username, client_id, device_id, device_type, status, updated_at, created_at
+            ) values
+                ('s-old', 1, 'echo', 'web', 'device-1', 'WEB', 'ACTIVE', timestamp '2026-04-17 09:00:00', timestamp '2026-04-17 09:00:00'),
+                ('s-new', 1, 'echo', 'web', 'device-1', 'WEB', 'REVOKED', timestamp '2026-04-17 10:00:00', timestamp '2026-04-17 10:00:00'),
+                ('s-other', 1, 'echo', 'web', 'device-2', 'WEB', 'ACTIVE', timestamp '2026-04-17 11:00:00', timestamp '2026-04-17 11:00:00')
+            """.trimIndent()
+        )
+        val service = JdbcSessionManagementService(jdbcTemplate)
+
+        val session = service.findLatestSessionByDevice(1L, "device-1")
+
+        assertEquals("s-new", session?.sessionId)
+        assertEquals("REVOKED", session?.status)
+        assertEquals("device-1", session?.deviceId)
+    }
+
+    @Test
+    fun `revoke sessions by device only revokes active sessions on target device`() {
+        seedUser("foxtrot", "P@ssw0rd1")
+        jdbcTemplate.update(
+            """
+            insert into sys_user_session (
+                session_id, user_id, username, client_id, device_id, device_type, status, created_at, updated_at
+            ) values
+                ('s1', 1, 'foxtrot', 'web', 'device-1', 'WEB', 'ACTIVE', current_timestamp, current_timestamp),
+                ('s2', 1, 'foxtrot', 'web', 'device-1', 'WEB', 'ACTIVE', current_timestamp, current_timestamp),
+                ('s3', 1, 'foxtrot', 'web', 'device-1', 'WEB', 'REVOKED', current_timestamp, current_timestamp),
+                ('s4', 1, 'foxtrot', 'web', 'device-2', 'WEB', 'ACTIVE', current_timestamp, current_timestamp)
+            """.trimIndent()
+        )
+        val service = JdbcSessionManagementService(jdbcTemplate)
+
+        val revokedCount = service.revokeSessionsByDevice(1L, "device-1", "DEVICE_DEACTIVATED")
+
+        assertEquals(2, revokedCount)
+        val rows = jdbcTemplate.queryForList(
+            "select session_id, status, revoke_reason from sys_user_session where user_id = 1 order by session_id"
+        )
+        assertEquals(listOf("REVOKED", "REVOKED", "REVOKED", "ACTIVE"), rows.map { it["status"] })
+        assertEquals(listOf("DEVICE_DEACTIVATED", "DEVICE_DEACTIVATED", null, null), rows.map { it["revoke_reason"] })
     }
 
     private fun seedUser(username: String, rawPassword: String) {

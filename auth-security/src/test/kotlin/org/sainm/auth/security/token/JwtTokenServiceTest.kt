@@ -3,6 +3,11 @@ package org.sainm.auth.security.token
 import org.sainm.auth.core.domain.UserPrincipal
 import org.sainm.auth.core.domain.UserStatus
 import org.sainm.auth.core.exception.InvalidTokenException
+import org.sainm.auth.core.spi.SessionManagementService
+import org.sainm.auth.core.spi.SessionOpenCommand
+import org.sainm.auth.core.spi.SessionPolicyMode
+import org.sainm.auth.core.spi.SessionTokenContext
+import org.sainm.auth.core.spi.UserSessionSummary
 import org.sainm.auth.core.spi.TokenBlacklistService
 import org.sainm.auth.core.spi.UserCredentialView
 import org.sainm.auth.core.spi.UserLookupService
@@ -232,6 +237,33 @@ class JwtTokenServiceTest {
             service.parse(tokenPair.accessToken)
         }
     }
+
+    @Test
+    fun `generate and parse preserves stable device id`() {
+        val sessionService = RecordingSessionManagementService()
+        val service = JwtTokenService(
+            properties = JwtTokenProperties(
+                secret = "change-me-change-me-change-me-change-me",
+                issuer = "unit-test",
+                accessTokenExpireMinutes = 30,
+                refreshTokenExpireDays = 7
+            ),
+            sessionManagementService = sessionService
+        )
+
+        val tokenPair = service.generate(
+            principal.copy(
+                attributes = principal.attributes + mapOf(
+                    "deviceId" to "web-device-001",
+                    "clientId" to "admin-web"
+                )
+            )
+        )
+        val parsed = service.parse(tokenPair.accessToken)
+
+        assertEquals("web-device-001", parsed.attributes["deviceId"])
+        assertEquals("web-device-001", sessionService.lastOpenCommand?.deviceId)
+    }
 }
 
 private class InMemoryTokenBlacklistService : TokenBlacklistService {
@@ -255,4 +287,25 @@ private class CountingUserLookupService(
     }
 
     override fun findByPrincipal(principal: String): UserCredentialView? = null
+}
+
+private class RecordingSessionManagementService : SessionManagementService {
+    var lastOpenCommand: SessionOpenCommand? = null
+
+    override fun openSession(command: SessionOpenCommand): SessionTokenContext {
+        lastOpenCommand = command
+        return SessionTokenContext("session-1", SessionPolicyMode.MULTI_DEVICE)
+    }
+
+    override fun touchSession(sessionId: String, userId: Long, accessExpireAtEpochSecond: Long, refreshExpireAtEpochSecond: Long): Boolean = true
+    override fun recordSessionActivity(sessionId: String, userId: Long): Boolean = true
+    override fun isSessionActive(sessionId: String, userId: Long): Boolean = true
+    override fun listSessions(userId: Long, limit: Int): List<UserSessionSummary> = emptyList()
+    override fun findLatestSessionByDevice(userId: Long, deviceId: String): UserSessionSummary? = null
+    override fun revokeSession(userId: Long, sessionId: String, reason: String?): Boolean = true
+    override fun revokeSessionsByDevice(userId: Long, deviceId: String, reason: String?): Int = 0
+    override fun revokeOtherSessions(userId: Long, currentSessionId: String, reason: String?): Int = 0
+    override fun revokeAllSessions(userId: Long, reason: String?): Int = 0
+    override fun getPolicy(userId: Long): SessionPolicyMode = SessionPolicyMode.MULTI_DEVICE
+    override fun updatePolicy(userId: Long, policy: SessionPolicyMode): SessionPolicyMode = policy
 }

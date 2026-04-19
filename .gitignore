@@ -21,6 +21,7 @@ out/
 
 # Kotlin
 .kotlin/
+.tmp-gradle/
 
 # OS
 .DS_Store

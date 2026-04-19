@@ -13,7 +13,10 @@ import org.sainm.auth.core.spi.LoginAttemptService
 import org.sainm.auth.core.spi.PermissionService
 import org.sainm.auth.core.spi.TokenService
 import org.sainm.auth.core.spi.UserLookupService
+import org.springframework.http.HttpHeaders
 import org.springframework.security.crypto.password.PasswordEncoder
+import org.springframework.web.context.request.RequestContextHolder
+import org.springframework.web.context.request.ServletRequestAttributes
 
 class PasswordAuthenticationHandler(
     private val userLookupService: UserLookupService,
@@ -34,6 +37,8 @@ class PasswordAuthenticationHandler(
                     AuditEvent(
                         type = "LOGIN_FAIL",
                         principal = command.principal,
+                        ip = currentRequestIp(),
+                        userAgent = currentUserAgent(),
                         detail = mapOf("reason" to "bad_credentials", "loginType" to "PASSWORD")
                     )
                 )
@@ -46,6 +51,8 @@ class PasswordAuthenticationHandler(
                     type = "ACCOUNT_LOCKED",
                     userId = credentialView.principal.userId,
                     principal = credentialView.principal.username,
+                    ip = currentRequestIp(),
+                    userAgent = currentUserAgent(),
                     detail = mapOf("reason" to "locked", "loginType" to "PASSWORD")
                 )
             )
@@ -58,6 +65,8 @@ class PasswordAuthenticationHandler(
                     AuditEvent(
                         type = "LOGIN_FAIL",
                         principal = command.principal,
+                        ip = currentRequestIp(),
+                        userAgent = currentUserAgent(),
                         detail = mapOf("reason" to "password_missing", "loginType" to "PASSWORD")
                     )
                 )
@@ -70,6 +79,8 @@ class PasswordAuthenticationHandler(
                 AuditEvent(
                     type = "LOGIN_FAIL",
                     principal = command.principal,
+                    ip = currentRequestIp(),
+                    userAgent = currentUserAgent(),
                     detail = mapOf(
                         "reason" to "bad_credentials",
                         "loginType" to "PASSWORD",
@@ -85,6 +96,8 @@ class PasswordAuthenticationHandler(
                         type = "ACCOUNT_LOCKED",
                         userId = credentialView.principal.userId,
                         principal = credentialView.principal.username,
+                        ip = currentRequestIp(),
+                        userAgent = currentUserAgent(),
                         detail = mapOf(
                             "reason" to "max_attempts_exceeded",
                             "lockedUntil" to attemptResult.lockedUntilEpochSecond
@@ -108,10 +121,21 @@ class PasswordAuthenticationHandler(
                 type = "LOGIN_SUCCESS",
                 userId = user.userId,
                 principal = user.username,
+                ip = currentRequestIp(),
+                userAgent = currentUserAgent(),
                 detail = mapOf("loginType" to "PASSWORD")
             )
         )
 
         return AuthResult(tokenPair = tokenPair, user = user)
     }
+
+    private fun currentRequestIp(): String? =
+        currentServletRequestAttributes()?.request?.remoteAddr?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun currentUserAgent(): String? =
+        currentServletRequestAttributes()?.request?.getHeader(HttpHeaders.USER_AGENT)?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun currentServletRequestAttributes(): ServletRequestAttributes? =
+        RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
 }

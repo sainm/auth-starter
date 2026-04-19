@@ -49,7 +49,9 @@ import org.springframework.jdbc.support.GeneratedKeyHolder
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.dao.EmptyResultDataAccessException
 import org.springframework.security.crypto.password.PasswordEncoder
+import java.sql.Timestamp
 import java.sql.Statement
+import java.time.Instant
 import java.util.UUID
 
 class JdbcUserLookupService(
@@ -215,7 +217,7 @@ class JdbcPasswordManagementService(
     private val minLength: Int
 ) : PasswordManagementService {
 
-    override fun changePassword(command: ChangePasswordCommand) {
+    override fun changePassword(command: ChangePasswordCommand): Long {
         validateNewPassword(command.newPassword)
         val credential = jdbcTemplate.queryForList(
             """
@@ -236,9 +238,10 @@ class JdbcPasswordManagementService(
             throw InvalidCredentialsException()
         }
         updatePassword(command.userId, command.newPassword)
+        return command.userId
     }
 
-    override fun resetPassword(command: ResetPasswordCommand) {
+    override fun resetPassword(command: ResetPasswordCommand): Long {
         validateNewPassword(command.newPassword)
         val userId = jdbcTemplate.queryForObject(
             """
@@ -251,6 +254,7 @@ class JdbcPasswordManagementService(
             command.principal
         ) ?: throw InvalidCredentialsException()
         updatePassword(userId, command.newPassword)
+        return userId
     }
 
     private fun updatePassword(userId: Long, newPassword: String) {
@@ -360,7 +364,7 @@ class JdbcPermissionService(
         ).firstOrNull()
 }
 
-class JdbcUserRegistrationService(
+open class JdbcUserRegistrationService(
     private val jdbcTemplate: JdbcTemplate,
     private val passwordEncoder: PasswordEncoder
 ) : UserRegistrationService {
@@ -427,7 +431,7 @@ class JdbcUserRegistrationService(
     }
 
     @Transactional
-    fun insertUser(
+    open fun insertUser(
         username: String,
         displayName: String,
         email: String?,
@@ -498,18 +502,24 @@ class JdbcAuditEventPublisher(
     private fun insertLoginLog(event: AuditEvent, result: String) {
         jdbcTemplate.update(
             """
-            insert into sys_login_log (user_id, principal, login_type, result, reason)
-            values (?, ?, ?, ?, ?)
+            insert into sys_login_log (user_id, principal, login_type, result, ip, user_agent, reason)
+            values (?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             event.userId,
             event.principal,
             event.detail["loginType"] ?: "PASSWORD",
             result,
+            event.ip,
+            event.userAgent,
             event.detail["reason"]
         )
     }
 
     private fun insertSecurityEvent(event: AuditEvent) {
+        val detail = linkedMapOf<String, Any?>().apply {
+            putAll(event.detail)
+            event.userAgent?.let { put("userAgent", it) }
+        }
         jdbcTemplate.update(
             """
             insert into sys_security_event (event_type, user_id, tenant_id, detail_json, ip)
@@ -518,8 +528,8 @@ class JdbcAuditEventPublisher(
             event.type,
             event.userId,
             event.detail["tenantId"],
-            objectMapper.writeValueAsString(event.detail),
-            event.detail["ip"]
+            objectMapper.writeValueAsString(detail),
+            event.ip
         )
     }
 }
@@ -663,7 +673,7 @@ class JdbcAuditQueryService(
     }
 }
 
-class JdbcUserAdminService(
+open class JdbcUserAdminService(
     private val jdbcTemplate: JdbcTemplate
 ) : UserAdminService {
 
@@ -815,7 +825,7 @@ class JdbcUserAdminService(
     }
 }
 
-class JdbcOrganizationService(
+open class JdbcOrganizationService(
     private val jdbcTemplate: JdbcTemplate
 ) : OrganizationService {
 
@@ -976,7 +986,7 @@ class JdbcOrganizationService(
     }
 }
 
-class JdbcSocialAccountService(
+open class JdbcSocialAccountService(
     private val jdbcTemplate: JdbcTemplate,
     private val userLookupService: UserLookupService,
     private val userRegistrationService: JdbcUserRegistrationService
@@ -1079,14 +1089,14 @@ class JdbcTokenBlacklistService(
         jdbcTemplate.update(
             """
             insert into sys_token_blacklist (jti, user_id, expire_at)
-            values (?, ?, to_timestamp(?))
+            values (?, ?, ?)
             on conflict (jti) do update
             set user_id = excluded.user_id,
                 expire_at = excluded.expire_at
             """.trimIndent(),
             jti,
             userId,
-            expireAtEpochSecond
+            expireAtEpochSecond.toSqlTimestamp()
         )
     }
 
@@ -1119,21 +1129,22 @@ class JdbcSessionManagementService(
         jdbcTemplate.update(
             """
             insert into sys_user_session (
-                session_id, user_id, username, tenant_id, client_id, device_type, device_name, user_agent, ip,
+                session_id, user_id, username, tenant_id, client_id, device_id, device_type, device_name, user_agent, ip,
                 status, last_seen_at, access_expire_at, refresh_expire_at, created_at, updated_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', current_timestamp, to_timestamp(?), to_timestamp(?), current_timestamp, current_timestamp)
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', current_timestamp, ?, ?, current_timestamp, current_timestamp)
             """.trimIndent(),
             sessionId,
             command.userId,
             command.username,
             command.tenantId,
             normalize(command.clientId, 128),
+            normalize(command.deviceId, 128),
             normalize(command.deviceType, 32),
             normalize(command.deviceName, 128),
             normalize(command.userAgent, 512),
             normalize(command.ip, 64),
-            command.accessExpireAtEpochSecond,
-            command.refreshExpireAtEpochSecond
+            command.accessExpireAtEpochSecond.toSqlTimestamp(),
+            command.refreshExpireAtEpochSecond.toSqlTimestamp()
         )
         return SessionTokenContext(sessionId = sessionId, policy = policy)
     }
@@ -1148,16 +1159,32 @@ class JdbcSessionManagementService(
             """
             update sys_user_session
             set last_seen_at = current_timestamp,
-                access_expire_at = to_timestamp(?),
-                refresh_expire_at = to_timestamp(?),
+                access_expire_at = ?,
+                refresh_expire_at = ?,
                 updated_at = current_timestamp
             where session_id = ?
               and user_id = ?
               and status = 'ACTIVE'
               and (revoked_at is null)
             """.trimIndent(),
-            accessExpireAtEpochSecond,
-            refreshExpireAtEpochSecond,
+            accessExpireAtEpochSecond.toSqlTimestamp(),
+            refreshExpireAtEpochSecond.toSqlTimestamp(),
+            sessionId,
+            userId
+        ) > 0
+
+    override fun recordSessionActivity(sessionId: String, userId: Long): Boolean =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set last_seen_at = current_timestamp,
+                updated_at = current_timestamp
+            where session_id = ?
+              and user_id = ?
+              and status = 'ACTIVE'
+              and revoked_at is null
+              and refresh_expire_at > current_timestamp
+            """.trimIndent(),
             sessionId,
             userId
         ) > 0
@@ -1189,6 +1216,7 @@ class JdbcSessionManagementService(
                 username,
                 tenant_id,
                 client_id,
+                device_id,
                 device_type,
                 device_name,
                 user_agent,
@@ -1213,6 +1241,39 @@ class JdbcSessionManagementService(
             limit.coerceIn(1, 100)
         )
 
+    override fun findLatestSessionByDevice(userId: Long, deviceId: String): UserSessionSummary? =
+        jdbcTemplate.query(
+            """
+            select
+                session_id,
+                user_id,
+                username,
+                tenant_id,
+                client_id,
+                device_id,
+                device_type,
+                device_name,
+                user_agent,
+                ip,
+                status,
+                last_seen_at,
+                access_expire_at,
+                refresh_expire_at,
+                created_at,
+                updated_at,
+                revoked_at,
+                revoke_reason
+            from sys_user_session
+            where user_id = ?
+              and device_id = ?
+            order by updated_at desc
+            limit 1
+            """.trimIndent(),
+            { rs, _ -> rs.toUserSessionSummary() },
+            userId,
+            normalize(deviceId, 128)
+        ).firstOrNull()
+
     override fun revokeSession(userId: Long, sessionId: String, reason: String?): Boolean =
         jdbcTemplate.update(
             """
@@ -1230,6 +1291,24 @@ class JdbcSessionManagementService(
             userId
         ) > 0
 
+    override fun revokeSessionsByDevice(userId: Long, deviceId: String, reason: String?): Int =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set status = 'REVOKED',
+                revoked_at = current_timestamp,
+                revoke_reason = ?,
+                updated_at = current_timestamp
+            where user_id = ?
+              and device_id = ?
+              and status = 'ACTIVE'
+              and revoked_at is null
+            """.trimIndent(),
+            normalize(reason, 64),
+            userId,
+            normalize(deviceId, 128)
+        )
+
     override fun revokeOtherSessions(userId: Long, currentSessionId: String, reason: String?): Int =
         jdbcTemplate.update(
             """
@@ -1245,6 +1324,21 @@ class JdbcSessionManagementService(
             normalize(reason, 64),
             userId,
             currentSessionId
+        )
+
+    override fun revokeAllSessions(userId: Long, reason: String?): Int =
+        jdbcTemplate.update(
+            """
+            update sys_user_session
+            set status = 'REVOKED',
+                revoked_at = current_timestamp,
+                revoke_reason = ?,
+                updated_at = current_timestamp
+            where user_id = ?
+              and revoked_at is null
+            """.trimIndent(),
+            normalize(reason, 64),
+            userId
         )
 
     override fun getPolicy(userId: Long): SessionPolicyMode =
@@ -1275,19 +1369,7 @@ class JdbcSessionManagementService(
     }
 
     private fun revokeAllActiveSessions(userId: Long, reason: String) {
-        jdbcTemplate.update(
-            """
-            update sys_user_session
-            set status = 'REVOKED',
-                revoked_at = current_timestamp,
-                revoke_reason = ?,
-                updated_at = current_timestamp
-            where user_id = ?
-              and revoked_at is null
-            """.trimIndent(),
-            reason,
-            userId
-        )
+        revokeAllSessions(userId, reason)
     }
 
     private fun normalize(value: String?, maxLength: Int): String? =
@@ -1312,6 +1394,7 @@ private fun java.sql.ResultSet.toUserSessionSummary(): UserSessionSummary =
         username = getString("username"),
         tenantId = getNullableLong("tenant_id"),
         clientId = getString("client_id"),
+        deviceId = getString("device_id"),
         deviceType = getString("device_type"),
         deviceName = getString("device_name"),
         userAgent = getString("user_agent"),
@@ -1325,4 +1408,6 @@ private fun java.sql.ResultSet.toUserSessionSummary(): UserSessionSummary =
         revokedAt = getTimestamp("revoked_at")?.toInstant()?.toString(),
         revokeReason = getString("revoke_reason")
     )
+
+private fun Long.toSqlTimestamp(): Timestamp = Timestamp.from(Instant.ofEpochSecond(this))
 

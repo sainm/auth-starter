@@ -5,9 +5,12 @@ import org.sainm.auth.audit.LoggingAuditEventPublisher
 import org.sainm.auth.autoconfigure.properties.AuthModuleProperties
 import org.sainm.auth.core.domain.LoginCommand
 import org.sainm.auth.core.domain.PasswordLoginCommand
+import org.sainm.auth.core.device.DefaultDeviceGovernanceEvaluator
+import org.sainm.auth.core.device.DeviceGovernanceEvaluator
 import org.sainm.auth.core.spi.AuditEventPublisher
 import org.sainm.auth.core.spi.AuditQueryService
 import org.sainm.auth.core.spi.AuthenticationHandler
+import org.sainm.auth.core.spi.DeviceGovernanceService
 import org.sainm.auth.core.spi.LoginAttemptService
 import org.sainm.auth.core.spi.OrganizationService
 import org.sainm.auth.core.spi.PasswordManagementService
@@ -39,6 +42,7 @@ import org.sainm.auth.security.config.AuthSecurityConfiguration
 import org.sainm.auth.security.handler.AuthenticationDispatcher
 import org.sainm.auth.security.handler.PasswordAuthenticationHandler
 import org.sainm.auth.security.service.DefaultSocialLoginService
+import org.sainm.auth.security.support.CurrentUserFacade
 import org.sainm.auth.social.google.GoogleIdTokenSocialAuthProvider
 import org.sainm.auth.social.google.MockGoogleSocialAuthProvider
 import org.sainm.auth.social.wechat.MockWechatSocialAuthProvider
@@ -46,10 +50,12 @@ import org.sainm.auth.social.wechat.WechatCodeSocialAuthProvider
 import org.sainm.auth.security.token.JwtTokenProperties
 import org.sainm.auth.security.token.JwtTokenService
 import org.sainm.auth.security.web.AuthController
+import org.sainm.auth.security.web.DeviceGovernanceController
 import org.sainm.auth.security.web.AuthExceptionHandler
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.properties.EnableConfigurationProperties
@@ -62,9 +68,59 @@ import org.springframework.security.crypto.password.PasswordEncoder
 @AutoConfiguration
 @ConditionalOnClass(AuthenticationDispatcher::class)
 @EnableConfigurationProperties(AuthModuleProperties::class)
-@Import(AuthSecurityConfiguration::class, AuthController::class, AuthExceptionHandler::class)
+@Import(AuthSecurityConfiguration::class, AuthExceptionHandler::class)
 @ConditionalOnProperty(prefix = "auth-module", name = ["enabled"], havingValue = "true", matchIfMissing = true)
 class AuthModuleAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    fun authController(
+        authenticationDispatcher: AuthenticationDispatcher,
+        userLookupService: UserLookupService,
+        permissionService: PermissionService,
+        tokenService: TokenService,
+        userRegistrationService: UserRegistrationService,
+        passwordManagementService: PasswordManagementService,
+        auditEventPublisher: AuditEventPublisher,
+        auditQueryService: AuditQueryService,
+        userAdminService: UserAdminService,
+        organizationService: OrganizationService,
+        sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
+        qrLoginServiceProvider: ObjectProvider<QrLoginService>,
+        socialLoginServiceProvider: ObjectProvider<SocialLoginService>,
+        properties: AuthModuleProperties
+    ): AuthController =
+        AuthController(
+            authenticationDispatcher = authenticationDispatcher,
+            userLookupService = userLookupService,
+            permissionService = permissionService,
+            tokenService = tokenService,
+            userRegistrationService = userRegistrationService,
+            passwordManagementService = passwordManagementService,
+            auditEventPublisher = auditEventPublisher,
+            auditQueryService = auditQueryService,
+            userAdminService = userAdminService,
+            organizationService = organizationService,
+            sessionManagementServiceProvider = sessionManagementServiceProvider,
+            qrLoginServiceProvider = qrLoginServiceProvider,
+            socialLoginServiceProvider = socialLoginServiceProvider,
+            selfRegistrationEnabled = properties.registration.selfServiceEnabled,
+            passwordMinLength = properties.security.password.minLength
+        )
+
+    @Bean
+    @ConditionalOnBean(DeviceGovernanceService::class)
+    @ConditionalOnMissingBean
+    fun deviceGovernanceController(
+        userLookupService: UserLookupService,
+        permissionService: PermissionService,
+        deviceGovernanceService: DeviceGovernanceService
+    ): DeviceGovernanceController =
+        DeviceGovernanceController(
+            userLookupService = userLookupService,
+            permissionService = permissionService,
+            deviceGovernanceService = deviceGovernanceService
+        )
 
     @Bean
     @ConditionalOnMissingBean
@@ -256,4 +312,15 @@ class AuthModuleAutoConfiguration {
     @ConditionalOnMissingBean(SessionManagementService::class)
     fun jdbcSessionManagementService(jdbcTemplate: JdbcTemplate): SessionManagementService =
         JdbcSessionManagementService(jdbcTemplate)
+
+    @Bean
+    @ConditionalOnMissingBean
+    fun currentUserFacade(
+        userLookupService: UserLookupService,
+        permissionService: PermissionService
+    ): CurrentUserFacade = CurrentUserFacade(userLookupService, permissionService)
+
+    @Bean
+    @ConditionalOnMissingBean(DeviceGovernanceEvaluator::class)
+    fun deviceGovernanceEvaluator(): DeviceGovernanceEvaluator = DefaultDeviceGovernanceEvaluator()
 }

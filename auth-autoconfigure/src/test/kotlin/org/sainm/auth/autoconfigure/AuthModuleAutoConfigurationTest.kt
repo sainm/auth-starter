@@ -1,6 +1,8 @@
 package org.sainm.auth.autoconfigure
 
 import org.sainm.auth.core.spi.QrLoginService
+import org.sainm.auth.core.device.DefaultDeviceGovernanceEvaluator
+import org.sainm.auth.core.device.DeviceGovernanceEvaluator
 import org.sainm.auth.core.spi.SocialAuthProvider
 import org.sainm.auth.core.spi.SocialLoginService
 import org.sainm.auth.security.service.DefaultSocialLoginService
@@ -105,5 +107,13 @@ class AuthModuleAutoConfigurationTest {
                 val provider = context.getBean("wechatSocialAuthProvider", SocialAuthProvider::class.java)
                 assertIs<WechatCodeSocialAuthProvider>(provider)
             }
+    }
+
+    @Test
+    fun `device governance evaluator is available by default`() {
+        contextRunner.run { context ->
+            val evaluator = context.getBean(DeviceGovernanceEvaluator::class.java)
+            assertIs<DefaultDeviceGovernanceEvaluator>(evaluator)
+        }
     }
 }

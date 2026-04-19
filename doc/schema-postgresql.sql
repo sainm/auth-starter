@@ -193,6 +193,7 @@ create table if not exists sys_user_session (
     username varchar(64) not null,
     tenant_id bigint,
     client_id varchar(128),
+    device_id varchar(128),
     device_type varchar(32),
     device_name varchar(128),
     user_agent varchar(512),
@@ -212,6 +213,7 @@ create table if not exists sys_user_session (
 create index if not exists idx_sys_user_session_user_status on sys_user_session (user_id, status);
 create index if not exists idx_sys_user_session_refresh_expire_at on sys_user_session (refresh_expire_at);
 create index if not exists idx_sys_user_session_updated_at on sys_user_session (updated_at desc);
+alter table if exists sys_user_session add column if not exists device_id varchar(128);
 
 create table if not exists sys_qr_scene (
     id bigserial primary key,

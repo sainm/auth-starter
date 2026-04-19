@@ -1,6 +1,7 @@
 package org.sainm.auth.security.api
 
 import jakarta.validation.constraints.NotBlank
+import jakarta.validation.constraints.Size
 import org.sainm.auth.core.domain.UserPrincipal
 
 data class PasswordLoginRequest(
@@ -8,8 +9,13 @@ data class PasswordLoginRequest(
     val principal: String,
     @field:NotBlank(message = "{auth.validation.notBlank}")
     val password: String,
+    @field:Size(max = 64, message = "{auth.validation.notBlank}")
     val clientId: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
+    val deviceId: String? = null,
+    @field:Size(max = 32, message = "{auth.validation.notBlank}")
     val deviceType: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
     val deviceName: String? = null
 )
 
@@ -26,6 +32,7 @@ data class CurrentUserProfileResponse(
     val username: String,
     val displayName: String?,
     val sessionId: String?,
+    val deviceId: String?,
     val roles: List<String>,
     val permissions: List<String>
 )
@@ -54,6 +61,11 @@ data class RegisterResponse(
     val userId: Long,
     val username: String,
     val defaultRoles: Set<String>
+)
+
+data class RegistrationOptionsResponse(
+    val selfServiceEnabled: Boolean,
+    val passwordMinLength: Int
 )
 
 data class RoleAssignRequest(
@@ -107,8 +119,13 @@ data class QrCancelRequest(
 data class SocialLoginRequest(
     @field:NotBlank(message = "{auth.validation.notBlank}")
     val authCode: String,
+    @field:Size(max = 64, message = "{auth.validation.notBlank}")
     val clientId: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
+    val deviceId: String? = null,
+    @field:Size(max = 32, message = "{auth.validation.notBlank}")
     val deviceType: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
     val deviceName: String? = null
 )
 
@@ -132,6 +149,7 @@ data class SessionSummaryResponse(
     val username: String,
     val tenantId: Long?,
     val clientId: String?,
+    val deviceId: String?,
     val deviceType: String?,
     val deviceName: String?,
     val userAgent: String?,
@@ -149,6 +167,10 @@ data class SessionSummaryResponse(
 
 data class SessionPolicyResponse(
     val policy: String
+)
+
+data class SessionRevokeResponse(
+    val revokedCount: Int
 )
 
 data class UpdateSessionPolicyRequest(
@@ -177,4 +199,41 @@ data class SecurityEventResponse(
     val detail: Map<String, Any?>,
     val ip: String?,
     val createdAt: String
+)
+
+data class DeviceRegistrationRequest(
+    @field:NotBlank(message = "{auth.validation.notBlank}")
+    @field:Size(max = 32, message = "{auth.validation.notBlank}")
+    val deviceType: String,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
+    val deviceId: String? = null,
+    @field:Size(max = 512, message = "{auth.validation.notBlank}")
+    val pushToken: String? = null,
+    @field:Size(max = 64, message = "{auth.validation.notBlank}")
+    val appVersion: String? = null
+)
+
+data class UserDeviceSummaryResponse(
+    val id: Long,
+    val deviceType: String,
+    val deviceId: String,
+    val pushTokenMasked: String?,
+    val appVersion: String?,
+    val activeFlag: Boolean,
+    val authSessionId: String?,
+    val authSessionStatus: String?,
+    val authSessionLastSeenAt: String?,
+    val deviceTrustLevel: String,
+    val riskSignals: List<String>,
+    val riskLevel: String,
+    val autoDisposition: String,
+    val autoDispositionReason: String?,
+    val lastActiveAt: String?,
+    val createdAt: String,
+    val updatedAt: String
+)
+
+data class UserDeviceDeactivationResponse(
+    val device: UserDeviceSummaryResponse,
+    val revokedSessionCount: Int
 )

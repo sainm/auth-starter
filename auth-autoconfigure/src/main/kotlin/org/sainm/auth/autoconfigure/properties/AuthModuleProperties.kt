@@ -7,11 +7,13 @@ data class AuthModuleProperties(
     val enabled: Boolean = true,
     val organization: OrganizationProperties = OrganizationProperties(),
     val authentication: AuthenticationProperties = AuthenticationProperties(),
+    val registration: RegistrationProperties = RegistrationProperties(),
     val social: SocialProperties = SocialProperties(),
     val qrLogin: QrLoginProperties = QrLoginProperties(),
     val performance: PerformanceProperties = PerformanceProperties(),
     val audit: AuditProperties = AuditProperties(),
-    val security: SecurityProperties = SecurityProperties()
+    val security: SecurityProperties = SecurityProperties(),
+    val deviceGovernance: DeviceGovernanceProperties = DeviceGovernanceProperties()
 )
 
 data class OrganizationProperties(
@@ -21,6 +23,10 @@ data class OrganizationProperties(
 
 data class AuthenticationProperties(
     val enabledTypes: Set<String> = setOf("PASSWORD", "GOOGLE", "WECHAT")
+)
+
+data class RegistrationProperties(
+    val selfServiceEnabled: Boolean = false
 )
 
 data class SocialProperties(
@@ -92,3 +98,39 @@ enum class OrganizationMode {
     GROUP,
     TENANT
 }
+
+data class DeviceGovernanceProperties(
+    val deviceStaleDays: Long = 30,
+    val sessionStaleDays: Long = 30,
+    val requiredPushTokenDeviceTypes: Set<String> = setOf("ANDROID", "IOS"),
+    val signalPolicies: DeviceGovernanceSignalPoliciesProperties = DeviceGovernanceSignalPoliciesProperties()
+)
+
+data class DeviceGovernanceSignalPoliciesProperties(
+    val deviceInactive: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(),
+    val pushTokenMissing: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(),
+    val authSessionMissing: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(),
+    val abnormalAuthSessionStatus: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(),
+    val authSessionStale: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(
+        riskLevel = "HIGH",
+        autoDisposition = "REVOKE_DEVICE_SESSIONS"
+    ),
+    val deviceStale: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(
+        riskLevel = "HIGH",
+        autoDisposition = "REVIEW_ONLY"
+    ),
+    val inactiveDeviceWithActiveSession: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(
+        riskLevel = "CRITICAL",
+        autoDisposition = "REVOKE_DEVICE_SESSIONS"
+    ),
+    val activeDeviceWithoutActiveSession: DeviceGovernanceSignalPolicyProperties = DeviceGovernanceSignalPolicyProperties(
+        riskLevel = "HIGH",
+        autoDisposition = "REVIEW_ONLY"
+    )
+)
+
+data class DeviceGovernanceSignalPolicyProperties(
+    val enabled: Boolean = true,
+    val riskLevel: String = "MEDIUM",
+    val autoDisposition: String = "REVIEW_ONLY"
+)

@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.sainm.auth.core.spi.AuditEvent
 import org.sainm.auth.core.spi.AuditEventPublisher
+import org.sainm.auth.core.spi.SessionManagementService
 import org.sainm.auth.core.spi.TokenService
 import org.sainm.auth.core.domain.UserPrincipal
 import org.sainm.auth.security.authz.AuthPermissionEvaluator
@@ -14,6 +15,7 @@ import org.springframework.context.MessageSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.support.ResourceBundleMessageSource
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.http.HttpMethod
 import org.springframework.security.config.Customizer
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
@@ -30,6 +32,7 @@ import java.util.Locale
 class AuthSecurityConfiguration {
 
     @Bean
+    @ConditionalOnMissingBean(name = ["messageSource"])
     fun messageSource(): ResourceBundleMessageSource =
         ResourceBundleMessageSource().apply {
             setBasenames("messages")
@@ -41,8 +44,14 @@ class AuthSecurityConfiguration {
     fun authPermissionEvaluator(): AuthPermissionEvaluator = AuthPermissionEvaluator()
 
     @Bean
-    fun jwtAuthenticationFilter(tokenService: TokenService): JwtAuthenticationFilter =
-        JwtAuthenticationFilter(tokenService)
+    fun jwtAuthenticationFilter(
+        tokenService: TokenService,
+        sessionManagementService: org.springframework.beans.factory.ObjectProvider<SessionManagementService>
+    ): JwtAuthenticationFilter =
+        JwtAuthenticationFilter(
+            tokenService = tokenService,
+            sessionManagementService = sessionManagementService.ifAvailable
+        )
 
     @Bean
     fun securityFilterChain(
@@ -63,6 +72,7 @@ class AuthSecurityConfiguration {
             }
             .authorizeHttpRequests {
                 it.requestMatchers(HttpMethod.POST, "/auth/login/password").permitAll()
+                it.requestMatchers(HttpMethod.GET, "/auth/register/options").permitAll()
                 it.requestMatchers(HttpMethod.POST, "/auth/register").permitAll()
                 it.requestMatchers(HttpMethod.POST, "/auth/token/refresh").permitAll()
                 it.requestMatchers(HttpMethod.POST, "/auth/social/google").permitAll()
@@ -101,6 +111,8 @@ class AuthSecurityConfiguration {
                     type = "ACCESS_DENIED",
                     userId = authenticatedUser?.userId ?: (authentication?.principal as? Long),
                     principal = authenticatedUser?.username ?: authentication?.name,
+                    ip = request.remoteAddr?.trim()?.takeIf { it.isNotEmpty() },
+                    userAgent = request.getHeader("User-Agent")?.trim()?.takeIf { it.isNotEmpty() },
                     detail = mapOf(
                         "path" to request.requestURI,
                         "method" to request.method,

@@ -34,8 +34,8 @@ data class UserRegistrationResult(
 )
 
 interface PasswordManagementService {
-    fun changePassword(command: ChangePasswordCommand)
-    fun resetPassword(command: ResetPasswordCommand)
+    fun changePassword(command: ChangePasswordCommand): Long
+    fun resetPassword(command: ResetPasswordCommand): Long
 }
 
 data class ChangePasswordCommand(
@@ -251,6 +251,7 @@ data class SessionOpenCommand(
     val username: String,
     val tenantId: Long?,
     val clientId: String? = null,
+    val deviceId: String? = null,
     val deviceType: String? = null,
     val deviceName: String? = null,
     val userAgent: String? = null,
@@ -270,6 +271,7 @@ data class UserSessionSummary(
     val username: String,
     val tenantId: Long?,
     val clientId: String?,
+    val deviceId: String?,
     val deviceType: String?,
     val deviceName: String?,
     val userAgent: String?,
@@ -287,12 +289,57 @@ data class UserSessionSummary(
 interface SessionManagementService {
     fun openSession(command: SessionOpenCommand): SessionTokenContext
     fun touchSession(sessionId: String, userId: Long, accessExpireAtEpochSecond: Long, refreshExpireAtEpochSecond: Long): Boolean
+    fun recordSessionActivity(sessionId: String, userId: Long): Boolean
     fun isSessionActive(sessionId: String, userId: Long): Boolean
     fun listSessions(userId: Long, limit: Int = 20): List<UserSessionSummary>
+    fun findLatestSessionByDevice(userId: Long, deviceId: String): UserSessionSummary?
     fun revokeSession(userId: Long, sessionId: String, reason: String? = null): Boolean
+    fun revokeSessionsByDevice(userId: Long, deviceId: String, reason: String? = null): Int
     fun revokeOtherSessions(userId: Long, currentSessionId: String, reason: String? = null): Int
+    fun revokeAllSessions(userId: Long, reason: String? = null): Int
     fun getPolicy(userId: Long): SessionPolicyMode
     fun updatePolicy(userId: Long, policy: SessionPolicyMode): SessionPolicyMode
+}
+
+data class DeviceRegistrationCommand(
+    val userId: Long,
+    val deviceType: String,
+    val deviceId: String? = null,
+    val pushToken: String? = null,
+    val appVersion: String? = null
+)
+
+data class UserDeviceSummary(
+    val id: Long,
+    val deviceType: String,
+    val deviceId: String,
+    val pushTokenMasked: String?,
+    val appVersion: String?,
+    val activeFlag: Boolean,
+    val authSessionId: String?,
+    val authSessionStatus: String?,
+    val authSessionLastSeenAt: String?,
+    val deviceTrustLevel: String,
+    val riskSignals: List<String>,
+    val riskLevel: String = "LOW",
+    val autoDisposition: String = "NONE",
+    val autoDispositionReason: String? = null,
+    val lastActiveAt: String?,
+    val createdAt: String,
+    val updatedAt: String
+)
+
+data class UserDeviceDeactivationResult(
+    val device: UserDeviceSummary,
+    val revokedSessionCount: Int
+)
+
+interface DeviceGovernanceService {
+    fun listMyDevices(userId: Long): List<UserDeviceSummary>
+    fun registerMyDevice(command: DeviceRegistrationCommand): UserDeviceSummary
+    fun deactivateMyDevice(userId: Long, deviceId: String): UserDeviceSummary
+    fun listUserDevices(userId: Long): List<UserDeviceSummary>
+    fun deactivateUserDevice(userId: Long, deviceId: String): UserDeviceDeactivationResult
 }
 
 interface TokenService {
@@ -315,5 +362,7 @@ data class AuditEvent(
     val type: String,
     val userId: Long? = null,
     val principal: String? = null,
+    val ip: String? = null,
+    val userAgent: String? = null,
     val detail: Map<String, Any?> = emptyMap()
 )

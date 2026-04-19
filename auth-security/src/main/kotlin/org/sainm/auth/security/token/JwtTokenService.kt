@@ -82,6 +82,7 @@ class JwtTokenService(
             attributes = buildMap {
                 put("passwordVersion", getIntegerClaim("passwordVersion"))
                 getStringClaim("sid")?.let { put("sessionId", it) }
+                getStringClaim("deviceId")?.let { put("deviceId", it) }
             }
         )
 
@@ -107,6 +108,7 @@ class JwtTokenService(
             .claim("tokenUse", tokenUse)
             .claim("passwordVersion", (principal.attributes["passwordVersion"] as? Number)?.toInt() ?: 1)
             .claim("sid", principal.attributes["sessionId"] as? String)
+            .claim("deviceId", principal.attributes["deviceId"] as? String)
             .build()
 
         val jwt = SignedJWT(
@@ -204,6 +206,7 @@ class JwtTokenService(
                 username = principal.username,
                 tenantId = principal.tenantId,
                 clientId = principal.attributes["clientId"] as? String,
+                deviceId = principal.attributes["deviceId"] as? String,
                 deviceType = principal.attributes["deviceType"] as? String,
                 deviceName = principal.attributes["deviceName"] as? String,
                 userAgent = principal.attributes["userAgent"] as? String,
