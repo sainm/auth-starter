@@ -6,6 +6,7 @@ include(
     "auth-persistence",
     "auth-social-wechat",
     "auth-social-google",
+    "auth-sso",
     "auth-qr",
     "auth-audit",
     "auth-autoconfigure",

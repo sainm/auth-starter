@@ -11,6 +11,7 @@ dependencies {
     implementation(project(":auth-qr"))
     implementation(project(":auth-social-google"))
     implementation(project(":auth-social-wechat"))
+    implementation(project(":auth-sso"))
     implementation("org.springframework.boot:spring-boot-autoconfigure")
     implementation("org.springframework.boot:spring-boot-configuration-processor")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")

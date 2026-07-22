@@ -5,6 +5,9 @@ import org.sainm.auth.core.domain.LoginCommand
 import org.sainm.auth.core.domain.PasswordLoginCommand
 import org.sainm.auth.core.domain.UserStatus
 import org.sainm.auth.core.exception.AccountLockedException
+import org.sainm.auth.core.exception.AccountPendingApprovalException
+import org.sainm.auth.core.exception.AccountPendingEmailException
+import org.sainm.auth.core.exception.AccountRejectedException
 import org.sainm.auth.core.exception.InvalidCredentialsException
 import org.sainm.auth.core.spi.AuditEvent
 import org.sainm.auth.core.spi.AuditEventPublisher
@@ -57,6 +60,13 @@ class PasswordAuthenticationHandler(
                 )
             )
             throw AccountLockedException()
+        }
+        // Pending-email / pending-approval / rejected accounts must not log in.
+        when (credentialView.principal.status) {
+            UserStatus.PENDING_EMAIL -> throw AccountPendingEmailException()
+            UserStatus.PENDING_APPROVAL -> throw AccountPendingApprovalException()
+            UserStatus.REJECTED -> throw AccountRejectedException()
+            else -> Unit
         }
         val passwordHash = credentialView.passwordHash
             ?: run {

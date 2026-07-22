@@ -9,6 +9,8 @@ data class AuthModuleProperties(
     val authentication: AuthenticationProperties = AuthenticationProperties(),
     val registration: RegistrationProperties = RegistrationProperties(),
     val social: SocialProperties = SocialProperties(),
+    val sso: SsoProperties = SsoProperties(),
+    val email: EmailProperties = EmailProperties(),
     val qrLogin: QrLoginProperties = QrLoginProperties(),
     val performance: PerformanceProperties = PerformanceProperties(),
     val audit: AuditProperties = AuditProperties(),
@@ -42,13 +44,66 @@ data class GoogleSocialProperties(
 data class WechatSocialProperties(
     val enabled: Boolean = false,
     val appId: String? = null,
-    val appSecret: String? = null
+    val appSecret: String? = null,
+    /** WeChat MP template IDs for notification delivery. */
+    val templateIds: WechatTemplateIdProperties = WechatTemplateIdProperties()
+)
+
+data class WechatTemplateIdProperties(
+    val taskRemind: String? = null,
+    val warningAlert: String? = null,
+    val appointmentResult: String? = null
+)
+
+data class SsoProperties(
+    /** Absolute base URL of THIS service, used to build the IdP callback URL. */
+    val callbackBaseUrl: String? = null,
+    /** Frontend page that receives the one-time ticket and exchanges it for tokens. */
+    val frontendCallbackUrl: String? = null,
+    val stateTtlSeconds: Long = 300,
+    val ticketTtlSeconds: Long = 120,
+    val oidc: OidcSsoProperties = OidcSsoProperties(),
+    val cas: CasSsoProperties = CasSsoProperties()
+)
+
+data class OidcSsoProperties(
+    val enabled: Boolean = false,
+    val issuer: String? = null,
+    val authorizationEndpoint: String? = null,
+    val tokenEndpoint: String? = null,
+    val jwkSetUri: String? = null,
+    val userInfoEndpoint: String? = null,
+    val clientId: String? = null,
+    val clientSecret: String? = null,
+    val scopes: List<String> = listOf("openid", "profile", "email"),
+    val usernameClaim: String = "sub",
+    val displayNameClaim: String = "name",
+    val emailClaim: String = "email"
+)
+
+data class CasSsoProperties(
+    val enabled: Boolean = false,
+    val serverUrl: String? = null,
+    val principalAttribute: String? = null,
+    val displayNameAttribute: String? = "displayName",
+    val emailAttribute: String? = "mail"
 )
 
 data class SecurityProperties(
     val jwt: JwtProperties = JwtProperties(),
     val password: PasswordProperties = PasswordProperties(),
     val lockStrategy: LockStrategyProperties = LockStrategyProperties()
+)
+
+data class EmailProperties(
+    /** Token TTL for email verification links (seconds). Default 24 h. */
+    val verifyTokenTtlSeconds: Long = 86400,
+    /** Max resend requests per email address per hour (advisory; enforced by gateway). */
+    val maxResendPerHour: Int = 3,
+    /** Subject line for the activation email. */
+    val activationSubject: String = "Activate your account",
+    /** Base URL prepended to the verification token link, e.g. https://psy.school.edu.cn */
+    val activationBaseUrl: String? = null
 )
 
 data class JwtProperties(

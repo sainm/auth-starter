@@ -26,6 +26,18 @@ class AccountLockedException(
     messageKey: String = "auth.accountLocked"
 ) : AuthException(messageKey, "AUTH_401003")
 
+class AccountPendingEmailException(
+    messageKey: String = "auth.account.pendingEmail"
+) : AuthException(messageKey, "AUTH_403001")
+
+class AccountPendingApprovalException(
+    messageKey: String = "auth.account.pendingApproval"
+) : AuthException(messageKey, "AUTH_403002")
+
+class AccountRejectedException(
+    messageKey: String = "auth.account.rejected"
+) : AuthException(messageKey, "AUTH_403003")
+
 class PasswordValidationException(
     messageKey: String = "auth.password.validation",
     vararg messageArgs: Any

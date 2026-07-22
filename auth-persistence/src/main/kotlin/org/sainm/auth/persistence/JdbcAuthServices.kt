@@ -137,6 +137,9 @@ class JdbcUserLookupService(
             status = when (status.toInt()) {
                 0 -> UserStatus.DISABLED
                 2 -> UserStatus.LOCKED
+                3 -> UserStatus.PENDING_EMAIL
+                4 -> UserStatus.PENDING_APPROVAL
+                5 -> UserStatus.REJECTED
                 else -> if (lockedUntil != null && lockedUntil.isAfter(java.time.Instant.now())) UserStatus.LOCKED else UserStatus.ENABLED
             },
             groupId = groupId,
@@ -380,7 +383,8 @@ open class JdbcUserRegistrationService(
             mobile = command.mobile,
             registerSource = "SELF",
             groupId = findDefaultGroupId(),
-            tenantId = findDefaultTenantId()
+            tenantId = findDefaultTenantId(),
+            initialStatus = command.initialStatus
         )
 
         jdbcTemplate.update(
@@ -430,6 +434,16 @@ open class JdbcUserRegistrationService(
         }
     }
 
+    override fun advanceUserStatus(userId: Long, fromStatus: Int, toStatus: Int) {
+        val updated = jdbcTemplate.update(
+            "update sys_user set status = ?, updated_at = current_timestamp where id = ? and status = ? and deleted = 0",
+            toStatus, userId, fromStatus
+        )
+        if (updated == 0) {
+            throw IllegalStateException("auth.user.statusAdvance.failed")
+        }
+    }
+
     @Transactional
     open fun insertUser(
         username: String,
@@ -438,7 +452,9 @@ open class JdbcUserRegistrationService(
         mobile: String?,
         registerSource: String,
         groupId: Long?,
-        tenantId: Long?
+        tenantId: Long?,
+        /** DB status value: 1=ENABLED(default), 3=PENDING_EMAIL, 4=PENDING_APPROVAL */
+        initialStatus: Int = 1
     ): Long {
         val keyHolder = GeneratedKeyHolder()
         jdbcTemplate.update({ connection ->
@@ -446,7 +462,7 @@ open class JdbcUserRegistrationService(
                 """
                 insert into sys_user (
                     username, display_name, email, mobile, status, register_source, password_version, deleted, group_id, tenant_id
-                ) values (?, ?, ?, ?, 1, ?, 1, 0, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
                 """.trimIndent(),
                 Statement.RETURN_GENERATED_KEYS
             ).apply {
@@ -454,9 +470,10 @@ open class JdbcUserRegistrationService(
                 setString(2, displayName)
                 setString(3, email)
                 setString(4, mobile)
-                setString(5, registerSource)
-                setNullableLong(6, groupId)
-                setNullableLong(7, tenantId)
+                setInt(5, initialStatus)
+                setString(6, registerSource)
+                setNullableLong(7, groupId)
+                setNullableLong(8, tenantId)
             }
         }, keyHolder)
 

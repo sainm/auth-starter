@@ -15,7 +15,13 @@ data class UserPrincipal(
 enum class UserStatus {
     ENABLED,
     DISABLED,
-    LOCKED
+    LOCKED,
+    /** Registered but email activation link not yet clicked. */
+    PENDING_EMAIL,
+    /** Email activated, waiting for admin approval before first login. */
+    PENDING_APPROVAL,
+    /** Admin rejected the registration. */
+    REJECTED
 }
 
 sealed interface LoginCommand

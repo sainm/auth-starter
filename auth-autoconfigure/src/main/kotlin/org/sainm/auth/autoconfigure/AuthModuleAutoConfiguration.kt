@@ -45,8 +45,25 @@ import org.sainm.auth.security.service.DefaultSocialLoginService
 import org.sainm.auth.security.support.CurrentUserFacade
 import org.sainm.auth.social.google.GoogleIdTokenSocialAuthProvider
 import org.sainm.auth.social.google.MockGoogleSocialAuthProvider
+import org.sainm.auth.social.wechat.DefaultWechatAccessTokenProvider
+import org.sainm.auth.social.wechat.DefaultWechatTemplateMessageService
 import org.sainm.auth.social.wechat.MockWechatSocialAuthProvider
+import org.sainm.auth.social.wechat.WechatAccessTokenProvider
 import org.sainm.auth.social.wechat.WechatCodeSocialAuthProvider
+import org.sainm.auth.social.wechat.WechatJsSdkService
+import org.sainm.auth.social.wechat.WechatMenuService
+import org.sainm.auth.core.spi.WechatTemplateMessageService
+import org.sainm.auth.security.service.InMemorySsoStateStore
+import org.sainm.auth.security.service.InMemoryEmailVerificationService
+import org.sainm.auth.security.service.NoOpMailSenderService
+import org.sainm.auth.security.service.NoOpWechatTemplateMessageService
+import org.sainm.auth.core.spi.EmailVerificationService
+import org.sainm.auth.core.spi.MailSenderService
+import org.sainm.auth.core.spi.SsoStateStore
+import org.sainm.auth.sso.CasProviderConfig
+import org.sainm.auth.sso.CasSsoAuthProvider
+import org.sainm.auth.sso.OidcProviderConfig
+import org.sainm.auth.sso.OidcSsoAuthProvider
 import org.sainm.auth.security.token.JwtTokenProperties
 import org.sainm.auth.security.token.JwtTokenService
 import org.sainm.auth.security.web.AuthController
@@ -88,6 +105,10 @@ class AuthModuleAutoConfiguration {
         sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
         qrLoginServiceProvider: ObjectProvider<QrLoginService>,
         socialLoginServiceProvider: ObjectProvider<SocialLoginService>,
+        ssoStateStoreProvider: ObjectProvider<SsoStateStore>,
+        ssoAuthProviders: ObjectProvider<org.sainm.auth.core.spi.SsoAuthProvider>,
+        emailVerificationServiceProvider: ObjectProvider<EmailVerificationService>,
+        mailSenderServiceProvider: ObjectProvider<MailSenderService>,
         properties: AuthModuleProperties
     ): AuthController =
         AuthController(
@@ -104,8 +125,19 @@ class AuthModuleAutoConfiguration {
             sessionManagementServiceProvider = sessionManagementServiceProvider,
             qrLoginServiceProvider = qrLoginServiceProvider,
             socialLoginServiceProvider = socialLoginServiceProvider,
+            ssoStateStoreProvider = ssoStateStoreProvider,
+            ssoAuthProviders = ssoAuthProviders,
+            emailVerificationService = emailVerificationServiceProvider,
+            mailSenderService = mailSenderServiceProvider,
             selfRegistrationEnabled = properties.registration.selfServiceEnabled,
-            passwordMinLength = properties.security.password.minLength
+            passwordMinLength = properties.security.password.minLength,
+            ssoCallbackBaseUrl = properties.sso.callbackBaseUrl.orEmpty(),
+            ssoFrontendCallbackUrl = properties.sso.frontendCallbackUrl.orEmpty(),
+            ssoStateTtlSeconds = properties.sso.stateTtlSeconds,
+            ssoTicketTtlSeconds = properties.sso.ticketTtlSeconds,
+            emailVerifyTokenTtlSeconds = properties.email.verifyTokenTtlSeconds,
+            emailActivationSubject = properties.email.activationSubject,
+            emailActivationBaseUrl = properties.email.activationBaseUrl.orEmpty()
         )
 
     @Bean
@@ -290,6 +322,107 @@ class AuthModuleAutoConfiguration {
         } else {
             MockWechatSocialAuthProvider()
         }
+
+    @Bean
+    @ConditionalOnMissingBean(WechatAccessTokenProvider::class)
+    fun wechatAccessTokenProvider(properties: AuthModuleProperties): WechatAccessTokenProvider? {
+        if (!properties.social.wechat.enabled || properties.social.wechat.appId.isNullOrBlank() ||
+            properties.social.wechat.appSecret.isNullOrBlank()) return null
+        return DefaultWechatAccessTokenProvider(
+            appId = properties.social.wechat.appId,
+            appSecret = properties.social.wechat.appSecret
+        )
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(WechatTemplateMessageService::class)
+    fun wechatTemplateMessageService(tokenProvider: ObjectProvider<WechatAccessTokenProvider>): WechatTemplateMessageService {
+        val tp = tokenProvider.ifAvailable
+        return if (tp != null) DefaultWechatTemplateMessageService(tp) else NoOpWechatTemplateMessageService()
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(WechatMenuService::class)
+    fun wechatMenuService(tokenProvider: ObjectProvider<WechatAccessTokenProvider>): WechatMenuService? {
+        val tp = tokenProvider.ifAvailable ?: return null
+        return WechatMenuService(tp)
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(WechatJsSdkService::class)
+    fun wechatJsSdkService(
+        properties: AuthModuleProperties,
+        tokenProvider: ObjectProvider<WechatAccessTokenProvider>
+    ): WechatJsSdkService? {
+        val tp = tokenProvider.ifAvailable ?: return null
+        val appId = properties.social.wechat.appId ?: return null
+        return WechatJsSdkService(appId, tp)
+    }
+
+    /** No-op template message service when WeChat is not configured. */
+    @Bean
+    @ConditionalOnMissingBean(name = ["noOpWechatTemplateMessageService"])
+    fun noOpWechatTemplateMessageService(): WechatTemplateMessageService = NoOpWechatTemplateMessageService()
+
+    @Bean
+    @ConditionalOnMissingBean(SsoStateStore::class)
+    fun ssoStateStore(): SsoStateStore = InMemorySsoStateStore()
+
+    @Bean
+    @ConditionalOnMissingBean(EmailVerificationService::class)
+    fun emailVerificationService(): EmailVerificationService = InMemoryEmailVerificationService()
+
+    @Bean
+    @ConditionalOnMissingBean(MailSenderService::class)
+    fun mailSenderService(): MailSenderService = NoOpMailSenderService()
+
+    @Bean
+    @ConditionalOnProperty(prefix = "auth-module.sso.oidc", name = ["enabled"], havingValue = "true")
+    @ConditionalOnMissingBean(name = ["oidcSsoAuthProvider"])
+    fun oidcSsoAuthProvider(properties: AuthModuleProperties): org.sainm.auth.core.spi.SsoAuthProvider {
+        val oidc = properties.sso.oidc
+        require(
+            !oidc.authorizationEndpoint.isNullOrBlank() &&
+                !oidc.tokenEndpoint.isNullOrBlank() &&
+                !oidc.jwkSetUri.isNullOrBlank() &&
+                !oidc.clientId.isNullOrBlank() &&
+                !oidc.clientSecret.isNullOrBlank() &&
+                !oidc.issuer.isNullOrBlank()
+        ) { "auth-module.sso.oidc is enabled but required properties are missing" }
+        return OidcSsoAuthProvider(
+            OidcProviderConfig(
+                issuer = oidc.issuer,
+                authorizationEndpoint = oidc.authorizationEndpoint,
+                tokenEndpoint = oidc.tokenEndpoint,
+                jwkSetUri = oidc.jwkSetUri,
+                userInfoEndpoint = oidc.userInfoEndpoint,
+                clientId = oidc.clientId,
+                clientSecret = oidc.clientSecret,
+                scopes = oidc.scopes,
+                usernameClaim = oidc.usernameClaim,
+                displayNameClaim = oidc.displayNameClaim,
+                emailClaim = oidc.emailClaim
+            )
+        )
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "auth-module.sso.cas", name = ["enabled"], havingValue = "true")
+    @ConditionalOnMissingBean(name = ["casSsoAuthProvider"])
+    fun casSsoAuthProvider(properties: AuthModuleProperties): org.sainm.auth.core.spi.SsoAuthProvider {
+        val cas = properties.sso.cas
+        require(!cas.serverUrl.isNullOrBlank()) {
+            "auth-module.sso.cas is enabled but server-url is missing"
+        }
+        return CasSsoAuthProvider(
+            CasProviderConfig(
+                serverUrl = cas.serverUrl,
+                principalAttribute = cas.principalAttribute,
+                displayNameAttribute = cas.displayNameAttribute,
+                emailAttribute = cas.emailAttribute
+            )
+        )
+    }
 
     @Bean
     @ConditionalOnMissingBean(SocialLoginService::class)

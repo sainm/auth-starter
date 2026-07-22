@@ -129,6 +129,19 @@ data class SocialLoginRequest(
     val deviceName: String? = null
 )
 
+data class SsoTicketExchangeRequest(
+    @field:NotBlank(message = "{auth.validation.notBlank}")
+    val ticket: String,
+    @field:Size(max = 64, message = "{auth.validation.notBlank}")
+    val clientId: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
+    val deviceId: String? = null,
+    @field:Size(max = 32, message = "{auth.validation.notBlank}")
+    val deviceType: String? = null,
+    @field:Size(max = 128, message = "{auth.validation.notBlank}")
+    val deviceName: String? = null
+)
+
 data class ChangePasswordRequest(
     @field:NotBlank(message = "{auth.validation.notBlank}")
     val oldPassword: String,
@@ -236,4 +249,22 @@ data class UserDeviceSummaryResponse(
 data class UserDeviceDeactivationResponse(
     val device: UserDeviceSummaryResponse,
     val revokedSessionCount: Int
+)
+
+data class ExternalRegisterRequest(
+    @field:NotBlank
+    val username: String,
+    @field:NotBlank
+    val password: String,
+    @field:NotBlank
+    @field:jakarta.validation.constraints.Email
+    val email: String,
+    @field:Size(max = 128)
+    val displayName: String? = null
+)
+
+data class ResendActivationRequest(
+    @field:NotBlank
+    @field:jakarta.validation.constraints.Email
+    val email: String
 )

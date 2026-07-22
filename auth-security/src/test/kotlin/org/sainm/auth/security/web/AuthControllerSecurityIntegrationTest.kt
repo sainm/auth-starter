@@ -404,6 +404,7 @@ class AuthControllerSecurityIntegrationTest {
         fun userRegistrationService(): UserRegistrationService = object : UserRegistrationService {
             override fun register(command: UserRegistrationCommand): UserRegistrationResult =
                 UserRegistrationResult(99, command.username, setOf("USER"))
+            override fun advanceUserStatus(userId: Long, fromStatus: Int, toStatus: Int) {}
         }
 
         @Bean

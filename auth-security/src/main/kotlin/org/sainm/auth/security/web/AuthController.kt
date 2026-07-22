@@ -19,7 +19,14 @@ import org.sainm.auth.core.spi.PermissionService
 import org.sainm.auth.core.spi.QrLoginService
 import org.sainm.auth.core.spi.ResetPasswordCommand
 import org.sainm.auth.core.spi.RoleAssignmentCommand
+import org.sainm.auth.core.spi.EmailVerificationService
+import org.sainm.auth.core.spi.MailSenderService
 import org.sainm.auth.core.spi.SocialLoginService
+import org.sainm.auth.core.spi.SsoAuthProvider
+import org.sainm.auth.core.spi.SsoAuthorizationRequest
+import org.sainm.auth.core.spi.SsoCallback
+import org.sainm.auth.core.spi.SsoState
+import org.sainm.auth.core.spi.SsoStateStore
 import org.sainm.auth.core.spi.TokenService
 import org.sainm.auth.core.spi.UserAdminService
 import org.sainm.auth.core.spi.UserLookupService
@@ -43,6 +50,8 @@ import org.sainm.auth.security.api.RegistrationOptionsResponse
 import org.sainm.auth.security.api.RefreshTokenRequest
 import org.sainm.auth.security.api.RegisterRequest
 import org.sainm.auth.security.api.RegisterResponse
+import org.sainm.auth.security.api.ExternalRegisterRequest
+import org.sainm.auth.security.api.ResendActivationRequest
 import org.sainm.auth.security.api.ResetPasswordRequest
 import org.sainm.auth.security.api.RoleAssignRequest
 import org.sainm.auth.security.api.SecurityEventResponse
@@ -50,11 +59,16 @@ import org.sainm.auth.security.api.SessionPolicyResponse
 import org.sainm.auth.security.api.SessionRevokeResponse
 import org.sainm.auth.security.api.SessionSummaryResponse
 import org.sainm.auth.security.api.SocialLoginRequest
+import org.sainm.auth.security.api.SsoTicketExchangeRequest
 import org.sainm.auth.security.api.UpdateSessionPolicyRequest
 import org.sainm.auth.security.handler.AuthenticationDispatcher
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import java.net.URI
+import java.util.UUID
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.access.prepost.PreAuthorize
 import org.springframework.security.access.AccessDeniedException
@@ -87,10 +101,28 @@ class AuthController(
     private val sessionManagementServiceProvider: ObjectProvider<SessionManagementService>,
     private val qrLoginServiceProvider: ObjectProvider<QrLoginService>,
     private val socialLoginServiceProvider: ObjectProvider<SocialLoginService>,
+    private val ssoStateStoreProvider: ObjectProvider<SsoStateStore>,
+    private val ssoAuthProviders: ObjectProvider<SsoAuthProvider>,
+    private val emailVerificationService: ObjectProvider<EmailVerificationService>,
+    private val mailSenderService: ObjectProvider<MailSenderService>,
     @Value("\${auth-module.registration.self-service-enabled:false}")
     private val selfRegistrationEnabled: Boolean,
     @Value("\${auth-module.security.password.min-length:8}")
-    private val passwordMinLength: Int
+    private val passwordMinLength: Int,
+    @Value("\${auth-module.sso.callback-base-url:}")
+    private val ssoCallbackBaseUrl: String,
+    @Value("\${auth-module.sso.frontend-callback-url:}")
+    private val ssoFrontendCallbackUrl: String,
+    @Value("\${auth-module.sso.state-ttl-seconds:300}")
+    private val ssoStateTtlSeconds: Long,
+    @Value("\${auth-module.sso.ticket-ttl-seconds:120}")
+    private val ssoTicketTtlSeconds: Long,
+    @Value("\${auth-module.email.verify-token-ttl-seconds:86400}")
+    private val emailVerifyTokenTtlSeconds: Long,
+    @Value("\${auth-module.email.activation-subject:Activate your account}")
+    private val emailActivationSubject: String,
+    @Value("\${auth-module.email.activation-base-url:}")
+    private val emailActivationBaseUrl: String
 ) {
 
     @PostMapping("/login/password")
@@ -165,6 +197,150 @@ class AuthController(
         servletRequest: HttpServletRequest
     ): ApiResponse<AuthResponse> =
         wechatLogin(request, servletRequest)
+
+    /**
+     * Start an SSO (CAS/OIDC) login: generate anti-forgery state/nonce, persist
+     * it, and redirect the browser to the identity provider authorization URL.
+     */
+    @GetMapping("/sso/{provider}/authorize")
+    fun ssoAuthorize(
+        @PathVariable provider: String,
+        @RequestParam(required = false) returnTo: String?
+    ): org.springframework.http.ResponseEntity<Void> {
+        val normalized = provider.uppercase()
+        val ssoProvider = ssoProvider(normalized)
+        val redirectUri = ssoRedirectUri(normalized)
+        val state = java.util.UUID.randomUUID().toString().replace("-", "")
+        val nonce = java.util.UUID.randomUUID().toString().replace("-", "")
+        ssoStateStore().save(
+            SsoState(
+                stateKey = state,
+                provider = normalized,
+                nonce = nonce,
+                redirectUri = redirectUri,
+                returnTo = returnTo?.takeIf { it.isNotBlank() }
+            ),
+            ssoStateTtlSeconds
+        )
+        val authorizationUrl = ssoProvider.buildAuthorizationUrl(
+            SsoAuthorizationRequest(
+                state = state,
+                nonce = nonce,
+                redirectUri = redirectUri,
+                returnTo = returnTo
+            )
+        )
+        return org.springframework.http.ResponseEntity
+            .status(org.springframework.http.HttpStatus.FOUND)
+            .location(java.net.URI.create(authorizationUrl))
+            .build()
+    }
+
+    /**
+     * SSO callback endpoint. OIDC calls back with `code`+`state`, CAS with
+     * `ticket`+ the original service (which equals our redirect URI). We validate
+     * state, resolve the identity, ensure a local user, then hand a short-lived
+     * one-time ticket back to the frontend via redirect so tokens never appear
+     * in a URL.
+     */
+    @GetMapping("/sso/{provider}/callback")
+    fun ssoCallback(
+        @PathVariable provider: String,
+        @RequestParam(required = false) code: String?,
+        @RequestParam(required = false) ticket: String?,
+        @RequestParam(required = false) state: String?,
+        servletRequest: HttpServletRequest
+    ): org.springframework.http.ResponseEntity<Void> {
+        val normalized = provider.uppercase()
+        val ssoProvider = ssoProvider(normalized)
+        val authCode = (code ?: ticket)?.trim()
+            ?: throw IllegalArgumentException("auth.sso.callback.code.missing")
+
+        // CAS does not echo our state param; OIDC does. When present it must match.
+        val savedState = state?.takeIf { it.isNotBlank() }?.let { ssoStateStore().consume(it) }
+        if (state != null && state.isNotBlank() && savedState == null) {
+            throw IllegalArgumentException("auth.sso.state.invalid")
+        }
+        val redirectUri = savedState?.redirectUri ?: ssoRedirectUri(normalized)
+
+        val identity = ssoProvider.resolve(
+            SsoCallback(
+                authCode = authCode,
+                state = state,
+                nonce = savedState?.nonce,
+                redirectUri = redirectUri
+            )
+        )
+        val user = runCatching {
+            enrichUser(socialLoginService().authenticate(normalized,
+                SsoCallback(authCode = authCode, state = state, nonce = savedState?.nonce, redirectUri = redirectUri)
+            ).userId)
+        }.onSuccess { resolved ->
+            auditEventPublisher.publish(
+                AuditEvent(
+                    type = "LOGIN_SUCCESS",
+                    userId = resolved.userId,
+                    principal = resolved.username,
+                    ip = clientIp(servletRequest),
+                    userAgent = clientUserAgent(servletRequest),
+                    detail = mapOf("loginType" to normalized)
+                )
+            )
+        }.onFailure { error ->
+            auditEventPublisher.publish(
+                AuditEvent(
+                    type = "LOGIN_FAIL",
+                    principal = normalized.lowercase(),
+                    ip = clientIp(servletRequest),
+                    userAgent = clientUserAgent(servletRequest),
+                    detail = mapOf(
+                        "loginType" to normalized,
+                        "reason" to (error.message ?: "sso_auth_failed")
+                    )
+                )
+            )
+        }.getOrThrow()
+
+        // One-time ticket -> frontend exchanges it for real tokens.
+        val exchangeTicket = java.util.UUID.randomUUID().toString().replace("-", "")
+        ssoStateStore().save(
+            SsoState(
+                stateKey = exchangeTicket,
+                provider = normalized,
+                userId = user.userId
+            ),
+            ssoTicketTtlSeconds
+        )
+        val frontend = savedState?.returnTo?.takeIf { it.isNotBlank() } ?: ssoFrontendCallbackUrl
+        require(frontend.isNotBlank()) { "auth.sso.frontendCallbackUrl.missing" }
+        val target = frontend + (if (frontend.contains('?')) "&" else "?") + "ticket=" + exchangeTicket
+        return org.springframework.http.ResponseEntity
+            .status(org.springframework.http.HttpStatus.FOUND)
+            .location(java.net.URI.create(target))
+            .build()
+    }
+
+    /** Exchange the one-time SSO ticket for a real token pair. */
+    @PostMapping("/sso/token")
+    fun ssoTokenExchange(
+        @Valid @RequestBody request: SsoTicketExchangeRequest,
+        servletRequest: HttpServletRequest
+    ): ApiResponse<AuthResponse> {
+        val state = ssoStateStore().consume(request.ticket.trim())
+            ?: throw IllegalArgumentException("auth.sso.ticket.invalid")
+        val userId = state.userId ?: throw IllegalArgumentException("auth.sso.ticket.invalid")
+        val user = enrichUser(userId)
+        return ApiResponse.ok(
+            buildAuthResponse(
+                user,
+                servletRequest,
+                request.clientId,
+                request.deviceId,
+                request.deviceType,
+                request.deviceName
+            )
+        )
+    }
 
     @PostMapping("/qr/scene")
     fun createQrScene(): ApiResponse<QrSceneResponse> =
@@ -336,6 +512,103 @@ class AuthController(
             )
         )
     }
+
+    /**
+     * Register an account for external users (e.g. overseas students) who cannot
+     * use WeChat. Creates a PENDING_EMAIL user and dispatches an activation email.
+     * Does NOT require authentication. Rate-limit at the gateway/load-balancer level.
+     */
+    @PostMapping("/external-register")
+    fun externalRegister(
+        @Valid @RequestBody request: ExternalRegisterRequest
+    ): ApiResponse<Map<String, Any>> {
+        val evService = emailVerificationService()
+        val mailer = mailSenderService()
+        val result = userRegistrationService.register(
+            UserRegistrationCommand(
+                username = request.username,
+                password = request.password,
+                email = request.email,
+                mobile = null,
+                displayName = request.displayName,
+                initialStatus = 3 // PENDING_EMAIL
+            )
+        )
+        val token = evService.generate(result.userId, request.email, emailVerifyTokenTtlSeconds)
+        val link = buildActivationLink(token)
+        mailer.send(
+            to = request.email,
+            subject = emailActivationSubject,
+            bodyHtml = buildActivationEmail(request.displayName ?: request.username, link)
+        )
+        return ApiResponse.ok(mapOf("userId" to result.userId, "message" to "Activation email sent"))
+    }
+
+    /**
+     * Activate an account via the emailed token. Changes status PENDING_EMAIL →
+     * PENDING_APPROVAL so an admin can then approve the account.
+     */
+    @GetMapping("/email-verify")
+    fun emailVerify(@RequestParam("token") token: String): ApiResponse<Map<String, String>> {
+        val evService = emailVerificationService()
+        val claim = evService.consume(token.trim())
+            ?: throw IllegalArgumentException("auth.email.verify.token.invalid")
+        // Advance status: PENDING_EMAIL(3) → PENDING_APPROVAL(4)
+        userRegistrationService.advanceUserStatus(claim.userId, fromStatus = 3, toStatus = 4)
+        return ApiResponse.ok(mapOf("message" to "Email verified. Pending admin approval."))
+    }
+
+    /**
+     * Resend the activation email for an account that is still in PENDING_EMAIL state.
+     * Rate-limit at the gateway level; minimal server-side check only.
+     */
+    @PostMapping("/external-register/resend")
+    fun resendActivation(
+        @Valid @RequestBody request: ResendActivationRequest
+    ): ApiResponse<Map<String, String>> {
+        val evService = emailVerificationService()
+        val mailer = mailSenderService()
+        val principal = userLookupService.findByPrincipal(request.email)
+            ?: return ApiResponse.ok(mapOf("message" to "If this email is registered, an activation link has been sent."))
+        if (principal.principal.status.name != "PENDING_EMAIL") {
+            return ApiResponse.ok(mapOf("message" to "If this email is registered, an activation link has been sent."))
+        }
+        val token = evService.generate(principal.principal.userId, request.email, emailVerifyTokenTtlSeconds)
+        val link = buildActivationLink(token)
+        mailer.send(
+            to = request.email,
+            subject = emailActivationSubject,
+            bodyHtml = buildActivationEmail(
+                principal.principal.displayName ?: principal.principal.username,
+                link
+            )
+        )
+        return ApiResponse.ok(mapOf("message" to "If this email is registered, an activation link has been sent."))
+    }
+
+    private fun emailVerificationService(): EmailVerificationService =
+        emailVerificationService.ifAvailable
+            ?: throw IllegalStateException("auth.email.verificationService.missing")
+
+    private fun mailSenderService(): MailSenderService =
+        mailSenderService.ifAvailable
+            ?: throw IllegalStateException("auth.email.mailSender.missing")
+
+    private fun buildActivationLink(token: String): String {
+        val base = emailActivationBaseUrl.trimEnd('/')
+        return if (base.isNotBlank()) "$base/auth/email-verify?token=$token"
+        else "/auth/email-verify?token=$token"
+    }
+
+    private fun buildActivationEmail(name: String, link: String): String =
+        """
+        <html><body>
+        <p>Hi $name,</p>
+        <p>Click the link below to activate your account. The link expires in 24 hours.</p>
+        <p><a href="$link">Activate My Account</a></p>
+        <p>If you did not register, please ignore this email.</p>
+        </body></html>
+        """.trimIndent()
 
     @PostMapping("/password/change")
     fun changePassword(
@@ -660,6 +933,18 @@ class AuthController(
 
     private fun socialLoginService(): SocialLoginService =
         socialLoginServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.social.disabled")
+
+    private fun ssoStateStore(): SsoStateStore =
+        ssoStateStoreProvider.ifAvailable ?: throw IllegalArgumentException("auth.sso.disabled")
+
+    private fun ssoProvider(provider: String): SsoAuthProvider =
+        ssoAuthProviders.orderedStream().filter { it.provider.uppercase() == provider }.findFirst().orElse(null)
+            ?: throw IllegalArgumentException("auth.sso.provider.unsupported")
+
+    private fun ssoRedirectUri(provider: String): String {
+        require(ssoCallbackBaseUrl.isNotBlank()) { "auth.sso.callbackBaseUrl.missing" }
+        return ssoCallbackBaseUrl.trimEnd('/') + "/auth/sso/" + provider.lowercase() + "/callback"
+    }
 
     private fun sessionManagementService(): SessionManagementService =
         sessionManagementServiceProvider.ifAvailable ?: throw IllegalArgumentException("auth.session.invalid")

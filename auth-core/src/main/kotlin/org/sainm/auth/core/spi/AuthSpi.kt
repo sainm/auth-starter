@@ -17,6 +17,12 @@ data class UserCredentialView(
 
 interface UserRegistrationService {
     fun register(command: UserRegistrationCommand): UserRegistrationResult
+    /**
+     * Transition a user's status in the DB. Used by the email-verify flow to
+     * advance PENDING_EMAIL → PENDING_APPROVAL (3 → 4), and by admin approval
+     * to advance PENDING_APPROVAL → ENABLED (4 → 1).
+     */
+    fun advanceUserStatus(userId: Long, fromStatus: Int, toStatus: Int)
 }
 
 data class UserRegistrationCommand(
@@ -24,7 +30,12 @@ data class UserRegistrationCommand(
     val password: String,
     val email: String?,
     val mobile: String?,
-    val displayName: String?
+    val displayName: String?,
+    /**
+     * DB status value for the created account:
+     * 1=ENABLED (default self-service), 3=PENDING_EMAIL (external registration).
+     */
+    val initialStatus: Int = 1
 )
 
 data class UserRegistrationResult(
@@ -218,12 +229,75 @@ data class QrLoginResult(
 
 interface SocialLoginService {
     fun authenticate(provider: String, authCode: String): UserPrincipal
+
+    /**
+     * Authenticate a social/SSO callback that carries additional context
+     * (e.g. OIDC state/nonce, CAS ticket). Providers that do not need the
+     * context fall back to [authenticate].
+     */
+    fun authenticate(provider: String, callback: SsoCallback): UserPrincipal =
+        authenticate(provider, callback.authCode)
 }
 
 interface SocialAuthProvider {
     val provider: String
     fun resolve(authCode: String): SocialIdentity
+
+    /**
+     * Resolve identity from a callback carrying extra context. Default
+     * implementation delegates to [resolve] so existing providers
+     * (Google/WeChat/mock) keep working without changes.
+     */
+    fun resolve(callback: SsoCallback): SocialIdentity = resolve(callback.authCode)
 }
+
+/**
+ * SSO redirect-based providers (CAS/OIDC) additionally build the redirect URL
+ * users are sent to before the callback comes back.
+ */
+interface SsoAuthProvider : SocialAuthProvider {
+    /**
+     * Build the identity-provider authorization URL the browser is redirected
+     * to. [request] carries the generated anti-forgery state/nonce and the
+     * absolute callback URL registered with the IdP.
+     */
+    fun buildAuthorizationUrl(request: SsoAuthorizationRequest): String
+}
+
+/**
+ * Anti-forgery / correlation state persisted between the authorize redirect and
+ * the callback. Backed by an in-memory store by default; override with a
+ * distributed (e.g. Redis) implementation in production.
+ */
+interface SsoStateStore {
+    fun save(state: SsoState, ttlSeconds: Long)
+    fun consume(stateKey: String): SsoState?
+}
+
+data class SsoState(
+    val stateKey: String,
+    val provider: String,
+    val nonce: String? = null,
+    val redirectUri: String? = null,
+    val returnTo: String? = null,
+    /** Set only on the post-login one-time ticket that the frontend exchanges for tokens. */
+    val userId: Long? = null,
+    val createdAtEpochSecond: Long = System.currentTimeMillis() / 1000
+)
+
+data class SsoAuthorizationRequest(
+    val state: String,
+    val nonce: String? = null,
+    val redirectUri: String,
+    val returnTo: String? = null
+)
+
+data class SsoCallback(
+    val authCode: String,
+    val state: String? = null,
+    val nonce: String? = null,
+    val redirectUri: String? = null
+)
 
 interface SocialAccountService {
     fun findOrCreate(identity: SocialIdentity): UserPrincipal
@@ -233,12 +307,49 @@ data class SocialIdentity(
     val provider: String,
     val externalId: String,
     val displayName: String? = null,
-    val email: String? = null
+    val email: String? = null,
+    val attributes: Map<String, String?> = emptyMap()
 )
 
 interface TokenBlacklistService {
     fun blacklist(jti: String, userId: Long, expireAtEpochSecond: Long)
     fun isBlacklisted(jti: String): Boolean
+}
+
+/**
+ * Sends WeChat Official Account template messages. Default no-op; override
+ * with real implementation that calls WeChat's template send API.
+ */
+interface WechatTemplateMessageService {
+    fun send(openId: String, templateId: String, data: Map<String, Any?>)
+}
+
+/**
+ * Generates and validates single-use email verification tokens.
+ * Backed by an in-memory store by default; override with Redis in production.
+ */
+interface EmailVerificationService {
+    fun generate(userId: Long, email: String, ttlSeconds: Long): String
+    fun consume(token: String): EmailVerificationClaim?
+}
+
+data class EmailVerificationClaim(
+    val userId: Long,
+    val email: String,
+    val createdAtEpochSecond: Long = System.currentTimeMillis() / 1000
+)
+
+/**
+ * Sends transactional emails. No-op by default; override with SMTP / provider.
+ */
+interface MailSenderService {
+    /**
+     * Send a plain-text or HTML email.
+     * @param to       recipient address
+     * @param subject  email subject
+     * @param bodyHtml HTML body (may fall back to plain-text when HTML is unsupported)
+     */
+    fun send(to: String, subject: String, bodyHtml: String)
 }
 
 enum class SessionPolicyMode {
